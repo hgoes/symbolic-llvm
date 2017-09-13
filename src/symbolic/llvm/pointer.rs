@@ -8,7 +8,7 @@ use super::frame::{FrameId};
 use super::program::{ThreadId};
 
 pub trait Pointer<'b> : Composite {
-    fn from_pointer<'a,Em : Embed>(OptRef<'a,BasePointer<'b>>,Transf<Em>) -> (OptRef<'a,Self>,Transf<Em>);
+    fn from_pointer<'a,Em : Embed>(usize,OptRef<'a,BasePointer<'b>>,Transf<Em>) -> (OptRef<'a,Self>,Transf<Em>);
     fn to_pointer<'a,Em : Embed>(OptRef<'a,Self>,Transf<Em>) -> Option<(OptRef<'a,BasePointer<'b>>,Transf<Em>)>;
 }
 
@@ -169,4 +169,19 @@ impl<'b> Composite for PointerTrg<'b> {
             Ok(None)
         }
     }
+}
+
+impl<'a> Pointer<'a> for BasePointer<'a> {
+    fn from_pointer<'b,Em : Embed>(_: usize,
+                                   base: OptRef<'b,BasePointer<'a>>,
+                                   inp_base: Transf<Em>)
+                                   -> (OptRef<'b,Self>,Transf<Em>) {
+        (base,inp_base)
+    }
+    fn to_pointer<'b,Em : Embed>(ptr: OptRef<'b,Self>,
+                                 inp_ptr: Transf<Em>)
+                                 -> Option<(OptRef<'b,BasePointer<'a>>,Transf<Em>)> {
+        Some((ptr,inp_ptr))
+    }
+
 }
