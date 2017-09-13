@@ -46,6 +46,12 @@ impl<'a,V : Bytes+Clone,Err> From<Err> for TrErr<'a,V,Err> {
 }
 
 impl<'a> InstructionRef<'a> {
+    pub fn entry(fun: &'a llvm_ir::Function) -> Self {
+        InstructionRef {
+            basic_block: &fun.body.as_ref().expect("Function has no body")[0].name,
+            instruction: 0
+        }
+    }
     pub fn resolve(&self,fun: &'a llvm_ir::Function) -> &'a llvm_ir::Instruction {
         &fun.body.as_ref().expect("Function has no body")
             .iter()
