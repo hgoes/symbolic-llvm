@@ -58,6 +58,10 @@ impl<'a> InstructionRef<'a> {
             .find(|bb| bb.name == *self.basic_block).expect("Cannot find basic block")
             .instrs[self.instruction]
     }
+    pub fn next(&self) -> Self {
+        InstructionRef { basic_block: self.basic_block,
+                         instruction: self.instruction + 1 }
+    }
 }
 
 const INDEX_WIDTH: usize = 32;
