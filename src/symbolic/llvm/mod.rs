@@ -406,7 +406,7 @@ pub trait Vector : Composite {
     fn vector<'a,Em : Embed>(OptRef<'a,Vec<Self>>,Vec<Transf<Em>>,&mut Em) -> Result<(OptRef<'a,Self>,Transf<Em>),Em::Error>;
 }
 
-#[derive(PartialEq,Eq,Hash,Debug)]
+#[derive(PartialEq,Eq,Hash,Clone,Debug)]
 pub enum BitVecValue {
     BoolValue(usize),
     BitVecValue(usize)
