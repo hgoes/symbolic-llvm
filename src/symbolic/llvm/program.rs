@@ -22,6 +22,11 @@ pub type Globals<'a,V> = Assoc<&'a String,MemSlice<V>>;
 
 pub type Heap<'a,V> = Assoc<InstructionRef<'a>,Vec<MemSlice<V>>>;
 
+pub type Step<'a> = Choice<(Data<ThreadId<'a>>,
+                            SingletonBitVec)>;
+
+pub type Nondet<'a,V> = Assoc<InstructionRef<'a>,V>;
+
 #[derive(PartialEq,Eq,Hash,Clone,Debug)]
 pub struct Program<'a,V : Bytes + Clone> {
     threads: Threads<'a,V>,
@@ -31,12 +36,16 @@ pub struct Program<'a,V : Bytes + Clone> {
 
 #[derive(PartialEq,Eq,Hash,Clone,Debug)]
 pub struct ProgramInput<'a,V : Bytes + Clone> {
-    step: Choice<(Data<ThreadId<'a>>,
-                  SingletonBitVec)>,
-    nondet: Assoc<InstructionRef<'a>,V>
+    step: Step<'a>,
+    nondet: Nondet<'a,V>
 }
 
 impl<'a,V : Bytes+Clone> ProgramInput<'a,V> {
+    pub fn new<'b,Em : Embed>(em: &mut Em) -> Result<(OptRef<'b,Self>,Transf<Em>),Em::Error> {
+        let (step,inp_step) = choice_empty();
+        let (nondet,inp_nondet) = assoc_empty()?;
+        Ok(program_input(step,inp_step,nondet,inp_nondet))
+    }
     pub fn add_thread(&mut self,thread_id: ThreadId<'a>) -> () {
         self.step.add((Data(thread_id),SingletonBitVec(STEP_BW)));
     }
@@ -208,6 +217,18 @@ pub fn program<'a,'b,'c,V,Em>(thrs: OptRef<'a,Threads<'b,V>>,
                          heap: heap.as_obj() };
     let prog_inp = Transformation::concat(&[inp_thrs,inp_glob,inp_heap]);
     (OptRef::Owned(prog),prog_inp)
+}
+
+pub fn program_input<'a,'b,'c,V,Em>(step: OptRef<'a,Step<'b>>,
+                                    inp_step: Transf<Em>,
+                                    nondet: OptRef<'a,Nondet<'b,V>>,
+                                    inp_nondet: Transf<Em>)
+                                    -> (OptRef<'c,ProgramInput<'b,V>>,Transf<Em>)
+    where V : Bytes + Clone,Em : Embed {
+    let pinp = ProgramInput { step: step.as_obj(),
+                              nondet: nondet.as_obj() };
+    let inp_pinp = Transformation::concat(&[inp_step,inp_nondet]);
+    (OptRef::Owned(pinp),inp_pinp)
 }
 
 pub fn decompose_program<'a,'b,V,Em>(prog: OptRef<'a,Program<'b,V>>,
