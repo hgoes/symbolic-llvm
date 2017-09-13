@@ -45,6 +45,15 @@ impl<'a,V : Bytes+Clone,Err> From<Err> for TrErr<'a,V,Err> {
     }
 }
 
+impl<'a> InstructionRef<'a> {
+    pub fn resolve(&self,fun: &'a llvm_ir::Function) -> &'a llvm_ir::Instruction {
+        &fun.body.as_ref().expect("Function has no body")
+            .iter()
+            .find(|bb| bb.name == *self.basic_block).expect("Cannot find basic block")
+            .instrs[self.instruction]
+    }
+}
+
 const INDEX_WIDTH: usize = 32;
 
 pub fn translate_init<'a,'b,V,Em>(module: &'a Module,
