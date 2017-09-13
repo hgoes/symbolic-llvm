@@ -5,8 +5,9 @@ use self::smtrs::embed::{Embed};
 use super::mem::{Bytes,MemSlice};
 use super::{InstructionRef};
 use super::thread::CallId;
+use std::fmt::Debug;
 
-#[derive(PartialEq,Eq,PartialOrd,Ord,Hash,Clone)]
+#[derive(PartialEq,Eq,PartialOrd,Ord,Hash,Clone,Debug)]
 pub enum FrameId<'a> {
     Call(CallId<'a>),
     Stack(CallId<'a>,InstructionRef<'a>)
@@ -18,13 +19,13 @@ pub type Allocations<'a,V> = Assoc<InstructionRef<'a>,Vec<MemSlice<V>>>;
 
 pub type Activation<'a> = Choice<Data<InstructionRef<'a>>>;
 
-#[derive(PartialEq,Eq,Hash,Clone)]
+#[derive(PartialEq,Eq,Hash,Clone,Debug)]
 pub struct Frame<'a,V : Bytes + Clone> {
     previous: PrevFrame<'a>,
     allocations: Allocations<'a,V>
 }
 
-#[derive(PartialEq,Eq,Hash,Clone)]
+#[derive(PartialEq,Eq,Hash,Clone,Debug)]
 pub struct CallFrame<'a,V> {
     values: Assoc<&'a String,V>,
     arguments: Vec<V>,

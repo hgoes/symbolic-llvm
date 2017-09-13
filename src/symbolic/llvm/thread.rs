@@ -16,7 +16,7 @@ pub type Stack<'a,V> = Assoc<InstructionRef<'a>,
                              BitVecVectorStack<Frame<'a,V>>>;
 pub type StackTop<'a> = Choice<Data<Option<FrameId<'a>>>>;
 
-#[derive(PartialEq,Eq,Hash,Clone)]
+#[derive(PartialEq,Eq,Hash,Clone,Debug)]
 pub struct Thread<'a,V : Bytes + Clone> {
     call_stack: CallStack<'a,V>,
     stack: Stack<'a,V>,

@@ -22,14 +22,14 @@ pub type Globals<'a,V> = Assoc<&'a String,MemSlice<V>>;
 
 pub type Heap<'a,V> = Assoc<InstructionRef<'a>,Vec<MemSlice<V>>>;
 
-#[derive(PartialEq,Eq,Hash,Clone)]
+#[derive(PartialEq,Eq,Hash,Clone,Debug)]
 pub struct Program<'a,V : Bytes + Clone> {
     threads: Threads<'a,V>,
     global: Globals<'a,V>,
     heap: Heap<'a,V>
 }
 
-#[derive(PartialEq,Eq,Hash,Clone)]
+#[derive(PartialEq,Eq,Hash,Clone,Debug)]
 pub struct ProgramInput<'a,V : Bytes + Clone> {
     step: Choice<(Data<ThreadId<'a>>,
                   SingletonBitVec)>,

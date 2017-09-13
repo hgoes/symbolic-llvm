@@ -3,6 +3,7 @@ extern crate smtrs;
 use self::smtrs::composite::{Composite,OptRef,Transformation,Transf};
 use self::smtrs::embed::{Embed};
 use std::cmp::{Ordering,max};
+use std::fmt::Debug;
 
 pub trait Bytes : Composite {
     fn byte_width(&self) -> usize;
@@ -10,13 +11,13 @@ pub trait Bytes : Composite {
                                     -> Result<Option<(OptRef<'a,Self>,Transf<Em>)>,Em::Error>;
 }
 
-#[derive(PartialEq,Eq,Hash,Clone)]
+#[derive(PartialEq,Eq,Hash,Clone,Debug)]
 pub enum MemObj<V : Composite> {
     FreshObj(usize),
     ValueObj(V)
 }
 
-#[derive(PartialEq,Eq,Hash,Clone)]
+#[derive(PartialEq,Eq,Hash,Clone,Debug)]
 pub struct MemSlice<V : Composite>(Vec<MemObj<V>>);
 
 impl<V : Composite> MemSlice<V> {
