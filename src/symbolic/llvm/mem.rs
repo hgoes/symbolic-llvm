@@ -7,7 +7,7 @@ use std::fmt::Debug;
 
 pub trait Bytes : Composite {
     fn byte_width(&self) -> usize;
-    fn extract_bytes<'a,Em : Embed>(OptRef<'a,Self>,Transf<Em>,usize,usize)
+    fn extract_bytes<'a,Em : Embed>(OptRef<'a,Self>,Transf<Em>,usize,usize,&mut Em)
                                     -> Result<Option<(OptRef<'a,Self>,Transf<Em>)>,Em::Error>;
 }
 
@@ -148,9 +148,9 @@ impl<V : Bytes + Clone> Composite for MemSlice<V> {
                                 cur_x = None;
                                 cur_y = None;
                             },
-                            Ordering::Less => match V::extract_bytes(OptRef::Ref(v2),rcur_y.1.clone(),0,w1)? {
+                            Ordering::Less => match V::extract_bytes(OptRef::Ref(v2),rcur_y.1.clone(),0,w1,em)? {
                                 None => return Ok(None),
-                                Some((spl1,inp1)) => match V::extract_bytes(OptRef::Ref(v2),rcur_y.1,w1,v2.byte_width()-w1)? {
+                                Some((spl1,inp1)) => match V::extract_bytes(OptRef::Ref(v2),rcur_y.1,w1,v2.byte_width()-w1,em)? {
                                     None => return Ok(None),
                                     Some((spl2,inp2)) => {
                                         nslice.push(MemObj::ValueObj(spl1.as_obj()));
@@ -187,9 +187,9 @@ impl<V : Bytes + Clone> Composite for MemSlice<V> {
                                 cur_y = Some((MemObj::FreshObj(w2-w1),
                                               Transformation::id(0)));
                             },
-                            Ordering::Greater => match V::extract_bytes(OptRef::Ref(&v1),rcur_x.1.clone(),0,w2)? {
+                            Ordering::Greater => match V::extract_bytes(OptRef::Ref(&v1),rcur_x.1.clone(),0,w2,em)? {
                                 None => return Ok(None),
-                                Some((spl1,inp1)) => match V::extract_bytes(OptRef::Ref(&v1),rcur_x.1,w2,w1-w2)? {
+                                Some((spl1,inp1)) => match V::extract_bytes(OptRef::Ref(&v1),rcur_x.1,w2,w1-w2,em)? {
                                     None => return Ok(None),
                                     Some((spl2,inp2)) => {
                                         nslice.push(MemObj::ValueObj(spl1.as_obj()));
@@ -216,9 +216,9 @@ impl<V : Bytes + Clone> Composite for MemSlice<V> {
                                         cur_y = None;
                                     }
                                 },
-                                Ordering::Less => match V::extract_bytes(OptRef::Ref(&v2),rcur_y.1.clone(),0,w1)? {
+                                Ordering::Less => match V::extract_bytes(OptRef::Ref(&v2),rcur_y.1.clone(),0,w1,em)? {
                                     None => return Ok(None),
-                                    Some((spl1,inp1)) => match V::extract_bytes(OptRef::Ref(&v2),rcur_y.1,w1,w2-w1)? {
+                                    Some((spl1,inp1)) => match V::extract_bytes(OptRef::Ref(&v2),rcur_y.1,w1,w2-w1,em)? {
                                         None => return Ok(None),
                                         Some((spl2,inp2)) => match V::combine(OptRef::Ref(&v1),spl1,
                                                                               rcur_x.1,inp1,
@@ -233,9 +233,9 @@ impl<V : Bytes + Clone> Composite for MemSlice<V> {
                                         }
                                     }
                                 },
-                                Ordering::Greater => match V::extract_bytes(OptRef::Ref(&v1),rcur_x.1.clone(),0,w2)? {
+                                Ordering::Greater => match V::extract_bytes(OptRef::Ref(&v1),rcur_x.1.clone(),0,w2,em)? {
                                     None => return Ok(None),
-                                    Some((spl1,inp1)) => match V::extract_bytes(OptRef::Ref(&v1),rcur_x.1,w2,w1-w2)? {
+                                    Some((spl1,inp1)) => match V::extract_bytes(OptRef::Ref(&v1),rcur_x.1,w2,w1-w2,em)? {
                                         None => return Ok(None),
                                         Some((spl2,inp2)) => match V::combine(spl1,OptRef::Ref(&v2),
                                                                               inp1,rcur_y.1,

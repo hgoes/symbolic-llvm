@@ -547,3 +547,31 @@ impl IntValue for BitVecValue {
         }
     }
 }
+
+impl Bytes for BitVecValue {
+    fn byte_width(&self) -> usize {
+        match self {
+            &BitVecValue::BoolValue(sz) => sz/8,
+            &BitVecValue::BitVecValue(sz) => sz/8
+        }
+    }
+    fn extract_bytes<'a,Em : Embed>(v: OptRef<'a,Self>,inp_v: Transf<Em>,start: usize,len: usize,em: &mut Em)
+                                    -> Result<Option<(OptRef<'a,Self>,Transf<Em>)>,Em::Error> {
+        match v.as_ref() {
+            &BitVecValue::BoolValue(sz) => {
+                let rsz = sz/8;
+                if start+len==rsz {
+                    Ok(Some((OptRef::Owned(BitVecValue::BoolValue(len*8)),inp_v)))
+                } else {
+                    let ninp = Transformation::const_bool(false,em)?;
+                    Ok(Some((OptRef::Owned(BitVecValue::BoolValue(len*8)),ninp)))
+                }
+            },
+            &BitVecValue::BitVecValue(sz) => {
+                let rsz = sz/8;
+                unimplemented!()
+                //let ninp = Transformation::map_by_elem(Box::new(|_,_,e,em| { em.
+            }
+        }
+    }
+}
