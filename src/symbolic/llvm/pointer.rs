@@ -95,7 +95,7 @@ pub fn offset_advance_dyn<'a,Em : Embed>(offset: OptRef<'a,Offset>,inp_offset: T
     }
 }
 
-#[derive(PartialEq,Eq,PartialOrd,Ord,Hash,Clone)]
+#[derive(PartialEq,Eq,PartialOrd,Ord,Hash,Clone,Debug)]
 pub enum PointerTrg<'a> {
     Null,
     Global(&'a String),
