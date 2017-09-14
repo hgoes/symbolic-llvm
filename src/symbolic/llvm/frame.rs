@@ -163,10 +163,10 @@ impl<'b,V : Bytes + Clone> Composite for Frame<'b,V> {
     fn elem_sort<Em : Embed>(&self,pos: usize,em: &mut Em)
                               -> Result<Em::Sort,Em::Error> {
         let sz1 = self.previous.num_elem();
-        if pos >= sz1 {
-            return self.previous.elem_sort(pos-sz1,em)
+        if pos < sz1 {
+            return self.previous.elem_sort(pos,em)
         }
-        return self.allocations.elem_sort(pos,em)
+        return self.allocations.elem_sort(pos-sz1,em)
     }
     fn combine<'a,Em,FComb,FL,FR>(x: OptRef<'a,Self>,y: OptRef<'a,Self>,
                                   inp_x: Transf<Em>,inp_y: Transf<Em>,
