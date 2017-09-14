@@ -39,6 +39,8 @@ pub fn frame<'a,'b,'c,V,Em>(prev: OptRef<'a,PrevFrame<'b>>,
                             inp_alloc: Transf<Em>)
                             -> (OptRef<'c,Frame<'b,V>>,Transf<Em>)
     where V : Bytes + Clone,Em : Embed {
+    debug_assert_eq!(prev.as_ref().num_elem(),inp_prev.size());
+    debug_assert_eq!(alloc.as_ref().num_elem(),inp_alloc.size());
     (OptRef::Owned(Frame { previous: prev.as_obj(),
                            allocations: alloc.as_obj() }),
      Transformation::concat(&[inp_prev,inp_alloc]))
@@ -75,6 +77,10 @@ pub fn call_frame<'a,'b,'c,V,Em>(vals: OptRef<'a,Assoc<&'b String,V>>,
                                  inp_phi: Transf<Em>)
                                  -> (OptRef<'c,CallFrame<'b,V>>,Transf<Em>)
     where V : Bytes+Clone,Em : Embed {
+    debug_assert_eq!(vals.as_ref().num_elem(),inp_vals.size());
+    debug_assert_eq!(args.as_ref().num_elem(),inp_args.size());
+    debug_assert_eq!(acts.as_ref().num_elem(),inp_acts.size());
+    debug_assert_eq!(phi.as_ref().num_elem(),inp_phi.size());
     (OptRef::Owned(CallFrame { values: vals.as_obj(),
                                arguments: args.as_obj(),
                                activation: acts.as_obj(),
