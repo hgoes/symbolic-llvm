@@ -219,6 +219,10 @@ pub fn program<'a,'b,'c,V,Em>(thrs: OptRef<'a,Threads<'b,V>>,
                               inp_heap: Transf<Em>)
                               -> (OptRef<'c,Program<'b,V>>,Transf<Em>)
     where V : Bytes + Clone,Em : Embed {
+    debug_assert_eq!(thrs.as_ref().num_elem(),inp_thrs.size());
+    debug_assert_eq!(glob.as_ref().num_elem(),inp_glob.size());
+    debug_assert_eq!(heap.as_ref().num_elem(),inp_heap.size());
+
     let prog = Program { threads: thrs.as_obj(),
                          global: glob.as_obj(),
                          heap: heap.as_obj() };
@@ -232,6 +236,9 @@ pub fn program_input<'a,'b,'c,V,Em>(step: OptRef<'a,Step<'b>>,
                                     inp_nondet: Transf<Em>)
                                     -> (OptRef<'c,ProgramInput<'b,V>>,Transf<Em>)
     where V : Bytes + Clone,Em : Embed {
+    debug_assert_eq!(step.as_ref().num_elem(),inp_step.size());
+    debug_assert_eq!(nondet.as_ref().num_elem(),inp_nondet.size());
+
     let pinp = ProgramInput { step: step.as_obj(),
                               nondet: nondet.as_obj() };
     let inp_pinp = Transformation::concat(&[inp_step,inp_nondet]);
