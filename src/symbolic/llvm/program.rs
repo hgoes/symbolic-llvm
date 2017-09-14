@@ -40,6 +40,15 @@ pub struct ProgramInput<'a,V : Bytes + Clone> {
     nondet: Nondet<'a,V>
 }
 
+impl<'a,V : Bytes+Clone> Program<'a,V> {
+    pub fn new<'b,Em : Embed>(em: &mut Em) -> Result<(OptRef<'b,Self>,Transf<Em>),Em::Error> {
+        let (threads,inp_threads) = assoc_empty()?;
+        let (globals,inp_globals) = assoc_empty()?;
+        let (heap,inp_heap) = assoc_empty()?;
+        Ok(program(threads,inp_threads,globals,inp_globals,heap,inp_heap))
+    }
+}
+
 impl<'a,V : Bytes+Clone> ProgramInput<'a,V> {
     pub fn new<'b,Em : Embed>(em: &mut Em) -> Result<(OptRef<'b,Self>,Transf<Em>),Em::Error> {
         let (step,inp_step) = choice_empty();
