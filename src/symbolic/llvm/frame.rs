@@ -164,9 +164,9 @@ impl<'b,V : Bytes + Clone> Composite for Frame<'b,V> {
                               -> Result<Em::Sort,Em::Error> {
         let sz1 = self.previous.num_elem();
         if pos >= sz1 {
-            return self.previous.elem_sort(pos,em)
+            return self.previous.elem_sort(pos-sz1,em)
         }
-        return self.allocations.elem_sort(pos-sz1,em)
+        return self.allocations.elem_sort(pos,em)
     }
     fn combine<'a,Em,FComb,FL,FR>(x: OptRef<'a,Self>,y: OptRef<'a,Self>,
                                   inp_x: Transf<Em>,inp_y: Transf<Em>,
