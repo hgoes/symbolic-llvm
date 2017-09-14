@@ -822,3 +822,18 @@ impl<'a,C : Pointer<'a>+Clone> Pointer<'a> for ByteWidth<C> {
         }
     }
 }
+
+impl<'a,C : Composite+Clone> Bytes for ByteWidth<C> {
+    fn byte_width(&self) -> usize {
+        self.byte_width
+    }
+    fn extract_bytes<'b,Em : Embed>(_:OptRef<'b,Self>,
+                                    _:Transf<Em>,
+                                    _:usize,
+                                    _:usize,
+                                    _:&mut Em)
+                                    -> Result<Option<(OptRef<'b,Self>,Transf<Em>)>,Em::Error> {
+        Ok(None)
+    }
+
+}
