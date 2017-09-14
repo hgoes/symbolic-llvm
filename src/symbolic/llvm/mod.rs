@@ -116,7 +116,7 @@ pub fn translate_init<'a,'b,V,Em>(module: &'a Module,
     let (top_main0,inp_top_main0) = choice_empty();
     let (top_main,inp_top_main) = choice_insert(top_main0,inp_top_main0,
                                                 Transformation::const_bool(true,em)?,
-                                                OptRef::Owned(Data(None)),
+                                                OptRef::Owned(Data(Some(FrameId::Call((None,entry_fun))))),
                                                 Transformation::id(0))?;
     let ret = OptRef::Owned(None);
     let inp_ret = Transformation::id(0);
