@@ -41,19 +41,17 @@ pub struct ProgramInput<'a,V : Bytes + Clone> {
 }
 
 impl<'a,V : Bytes+Clone> Program<'a,V> {
-    pub fn new<'b,Em : Embed>() -> Result<(OptRef<'b,Self>,Transf<Em>),Em::Error> {
-        let (threads,inp_threads) = assoc_empty()?;
-        let (globals,inp_globals) = assoc_empty()?;
-        let (heap,inp_heap) = assoc_empty()?;
-        Ok(program(threads,inp_threads,globals,inp_globals,heap,inp_heap))
+    pub fn new() -> Self {
+        Program { threads: Assoc::new(),
+                  global: Assoc::new(),
+                  heap: Assoc::new() }
     }
 }
 
 impl<'a,V : Bytes+Clone> ProgramInput<'a,V> {
-    pub fn new<'b,Em : Embed>() -> Result<(OptRef<'b,Self>,Transf<Em>),Em::Error> {
-        let (step,inp_step) = choice_empty();
-        let (nondet,inp_nondet) = assoc_empty()?;
-        Ok(program_input(step,inp_step,nondet,inp_nondet))
+    pub fn new() -> Self {
+        ProgramInput { step: Choice::new(),
+                       nondet: Assoc::new() }
     }
     pub fn add_thread(&mut self,thread_id: ThreadId<'a>) -> () {
         self.step.add((Data(thread_id),SingletonBitVec(STEP_BW)));
