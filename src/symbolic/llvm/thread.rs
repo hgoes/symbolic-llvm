@@ -156,6 +156,10 @@ pub fn thread<'a,'b,'c,V,Em>(cs: OptRef<'a,CallStack<'b,V>>,
                              inp_ret: Transf<Em>)
                              -> (OptRef<'c,Thread<'b,V>>,Transf<Em>)
     where V : Bytes+Clone,Em : Embed {
+    debug_assert_eq!(cs.as_ref().num_elem(),inp_cs.size());
+    debug_assert_eq!(st.as_ref().num_elem(),inp_st.size());
+    debug_assert_eq!(top.as_ref().num_elem(),inp_top.size());
+    debug_assert_eq!(ret.as_ref().num_elem(),inp_ret.size());
     (OptRef::Owned(Thread { call_stack: cs.as_obj(),
                             stack: st.as_obj(),
                             stack_top: top.as_obj(),
