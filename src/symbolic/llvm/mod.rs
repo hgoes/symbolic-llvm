@@ -146,7 +146,7 @@ pub fn translate_init<'a,'b,V,Em>(module: &'a Module,
 pub fn translate_instr<'a,'b : 'a,V,Em
                        >(dl: &'b DataLayout,
                          tps: &'b HashMap<String,Type>,
-                         thread_id: &(Option<InstructionRef<'b>>,&'b String),
+                         thread_id: &ThreadId<'b>,
                          cf_id: &CallId<'b>,
                          instr_id: &InstructionRef<'b>,
                          instr: &'b llvm_ir::Instruction,
