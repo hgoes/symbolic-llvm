@@ -306,7 +306,7 @@ pub fn translate_value<'a,'b,V,Em>(dl: &'b DataLayout,
     match value {
         &llvm_ir::Value::Constant(ref c) => {
             let (obj,els) = translate_constant(dl,c,tp,tps,em)?;
-            Ok((obj,els))
+            Ok((OptRef::Owned(obj),els))
         },
         &llvm_ir::Value::Local(ref name) => {
             let (vals,vals_inp) = call_frame_get_values(cf,cf_inp);
@@ -319,12 +319,12 @@ pub fn translate_value<'a,'b,V,Em>(dl: &'b DataLayout,
     }
 }
 
-pub fn translate_constant<'a,'b : 'a,V,Em>(dl: &'b DataLayout,
-                                           c: &'b llvm_ir::Constant,
-                                           tp: &'b Type,
-                                           mp: &HashMap<String,Type>,
-                                           em: &mut Em)
-                                           -> Result<(OptRef<'a,V>,Transf<Em>),Em::Error>
+pub fn translate_constant<'b,V,Em>(dl: &'b DataLayout,
+                                   c: &'b llvm_ir::Constant,
+                                   tp: &'b Type,
+                                   mp: &HashMap<String,Type>,
+                                   em: &mut Em)
+                                   -> Result<(V,Transf<Em>),Em::Error>
     where V : Bytes+Pointer<'b>+IntValue+Vector+Clone, Em : Embed {
 
     match c {
@@ -332,13 +332,15 @@ pub fn translate_constant<'a,'b : 'a,V,Em>(dl: &'b DataLayout,
             let (sz,_,_) = dl.pointer_alignment(0);
             let (ptr,inp_ptr) = base_pointer_global(glb,em)?;
             let (bw,_,_) = dl.pointer_alignment(0);
-            let res : (OptRef<'a,V>,Transf<Em>) = V::from_pointer((bw/8) as usize,ptr,inp_ptr);
-            Ok(res)
+            let (res,inp_res) = V::from_pointer((bw/8) as usize,
+                                                OptRef::Owned(ptr),
+                                                inp_ptr);
+            Ok((res.as_obj(),inp_res))
         },
         &llvm_ir::Constant::Int(ref val) => match tp {
             &Type::Int(bw) => {
                 let (rv,rv_inp) = V::const_int(bw,val.clone(),em)?;
-                Ok((OptRef::Owned(rv),Transformation::constant(rv_inp)))
+                Ok((rv,Transformation::constant(rv_inp)))
             },
             _ => panic!("Integer value with non-integer type")
         },
@@ -350,12 +352,12 @@ pub fn translate_constant<'a,'b : 'a,V,Em>(dl: &'b DataLayout,
                 _ => panic!("Array value with non-array type")
             };
             for el in arr.iter() {
-                let (val,c) = translate_constant(dl,el,el_tp,mp,em)?;
-                varr.push(val.as_obj());
+                let (val,c) : (V,Transf<Em>) = translate_constant(dl,el,el_tp,mp,em)?;
+                varr.push(val);
                 earr.push(c);
             }
             let (res,inp_res) = V::vector(OptRef::Owned(varr),earr,em)?;
-            Ok((res,inp_res))
+            Ok((res.as_obj(),inp_res))
         },
         &llvm_ir::Constant::GEP(ref gep) => {
             let mut cur_tp = &gep.ptr.tp;
@@ -380,23 +382,24 @@ pub fn translate_constant<'a,'b : 'a,V,Em>(dl: &'b DataLayout,
                     &Type::Pointer(ref ptr_tp,_) => {
                         let sz = dl.type_size_in_bits(ptr_tp,mp);
                         let (idx,idx_inp) = translate_constant(dl,&el.val,ptr_tp,mp,em)?;
-                        res.push((Some(V::to_offset(idx,idx_inp)),sz as usize));
+                        res.push((Some(V::to_offset(OptRef::Owned(idx),idx_inp)),sz as usize));
                         ptr_tp
                     },
                     &Type::Array(_,ref sub_tp) => {
                         let sz = dl.type_size_in_bits(sub_tp,mp);
                         let (idx,idx_inp) = translate_constant(dl,&el.val,sub_tp,mp,em)?;
-                        res.push((Some(V::to_offset(idx,idx_inp)),sz as usize));
+                        res.push((Some(V::to_offset(OptRef::Owned(idx),idx_inp)),sz as usize));
                         sub_tp
                     },
                     _ => unimplemented!()
                 }
             }
-            let (base,base_inp) : (OptRef<'a,V>,Transf<Em>) = translate_constant(dl,&gep.ptr.val,&gep.ptr.tp,mp,em)?;
-            let bw = base.as_ref().byte_width();
-            let (ptr,ptr_inp) = V::to_pointer(base,base_inp).expect("Cannot convert to pointer");
+            let (base,base_inp) : (V,Transf<Em>) = translate_constant(dl,&gep.ptr.val,&gep.ptr.tp,mp,em)?;
+            let bw = base.byte_width();
+            let (ptr,ptr_inp) = V::to_pointer(OptRef::Owned(base),base_inp).expect("Cannot convert to pointer");
             let (nptr,nptr_inp) = base_pointer_gep(ptr,ptr_inp,res,em)?;
-            Ok(V::from_pointer(bw,nptr,nptr_inp))
+            let (res,inp_res) = V::from_pointer(bw,nptr,nptr_inp);
+            Ok((res.as_obj(),inp_res))
         },
         _ => unimplemented!()
     }
@@ -431,7 +434,8 @@ pub trait Vector : Composite {
 #[derive(PartialEq,Eq,Hash,Clone,Debug)]
 pub enum CompValue<Ptr,V> {
     Value(V),
-    Pointer(Ptr)
+    Pointer(Ptr),
+    Vector(Vec<CompValue<Ptr,V>>)
 }
 
 #[derive(PartialEq,Eq,Hash,Clone,Debug)]
@@ -617,10 +621,14 @@ impl<Ptr,V> CompValue<Ptr,V> {
                 => CompValue::Value(OptRef::Owned(v)),
             OptRef::Owned(CompValue::Pointer(p))
                 => CompValue::Pointer(OptRef::Owned(p)),
+            OptRef::Owned(CompValue::Vector(mut v))
+                => CompValue::Vector(v.drain(..).map(|x| CompValue::lower(OptRef::Owned(x))).collect()),
             OptRef::Ref(&CompValue::Value(ref v))
                 => CompValue::Value(OptRef::Ref(v)),
             OptRef::Ref(&CompValue::Pointer(ref p))
-                => CompValue::Pointer(OptRef::Ref(p))
+                => CompValue::Pointer(OptRef::Ref(p)),
+            OptRef::Ref(&CompValue::Vector(ref v))
+                => CompValue::Vector(v.iter().map(|x| CompValue::lower(OptRef::Ref(x))).collect()),
         }
     }
 }
@@ -629,14 +637,16 @@ impl<Ptr : Composite+Clone,V : Composite+Clone> Composite for CompValue<Ptr,V> {
     fn num_elem(&self) -> usize {
         match self {
             &CompValue::Value(ref v) => v.num_elem(),
-            &CompValue::Pointer(ref p) => p.num_elem()
+            &CompValue::Pointer(ref p) => p.num_elem(),
+            &CompValue::Vector(ref v) => v.num_elem()
         }
     }
     fn elem_sort<Em : Embed>(&self,n:usize,em: &mut Em)
                              -> Result<Em::Sort,Em::Error> {
         match self {
             &CompValue::Value(ref v) => v.elem_sort(n,em),
-            &CompValue::Pointer(ref p) => p.elem_sort(n,em)
+            &CompValue::Pointer(ref p) => p.elem_sort(n,em),
+            &CompValue::Vector(ref v) => v.elem_sort(n,em)
         }
     }
     fn combine<'a,Em,FComb,FL,FR>(x: OptRef<'a,Self>,y: OptRef<'a,Self>,
@@ -648,27 +658,96 @@ impl<Ptr : Composite+Clone,V : Composite+Clone> Composite for CompValue<Ptr,V> {
               FL : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
               FR : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error> {
 
-        let rx = CompValue::lower(x);
-        let ry = CompValue::lower(y);
-
-        match rx {
-            CompValue::Value(vx) => match ry {
-                CompValue::Value(vy)
-                    => match V::combine(vx,vy,inp_x,inp_y,
-                                        comb,only_l,only_r,em)? {
-                        None => Ok(None),
-                        Some((nv,inp_nv)) => Ok(Some((OptRef::Owned(CompValue::Value(nv.as_obj())),inp_nv)))
-                    },
-                CompValue::Pointer(_) => Ok(None)
+        match x {
+            OptRef::Ref(&CompValue::Value(ref vx)) => {
+                let rvx = OptRef::Ref(vx);
+                let rvy = match y {
+                    OptRef::Ref(&CompValue::Value(ref vy))
+                        => OptRef::Ref(vy),
+                    OptRef::Owned(CompValue::Value(vy))
+                        => OptRef::Owned(vy),
+                    _ => return Ok(None)
+                };
+                match V::combine(rvx,rvy,inp_x,inp_y,
+                                 comb,only_l,only_r,em)? {
+                    None => Ok(None),
+                    Some((nv,inp_nv)) => Ok(Some((OptRef::Owned(CompValue::Value(nv.as_obj())),inp_nv)))
+                }
             },
-            CompValue::Pointer(px) => match ry {
-                CompValue::Pointer(py)
-                    => match Ptr::combine(px,py,inp_x,inp_y,
-                                          comb,only_l,only_r,em)? {
-                        None => Ok(None),
-                        Some((np,inp_np)) => Ok(Some((OptRef::Owned(CompValue::Pointer(np.as_obj())),inp_np)))
-                    },
-                CompValue::Value(_) => Ok(None)
+            OptRef::Owned(CompValue::Value(vx)) => {
+                let rvx = OptRef::Owned(vx);
+                let rvy = match y {
+                    OptRef::Ref(&CompValue::Value(ref vy))
+                        => OptRef::Ref(vy),
+                    OptRef::Owned(CompValue::Value(vy))
+                        => OptRef::Owned(vy),
+                    _ => return Ok(None)
+                };
+                match V::combine(rvx,rvy,inp_x,inp_y,
+                                 comb,only_l,only_r,em)? {
+                    None => Ok(None),
+                    Some((nv,inp_nv)) => Ok(Some((OptRef::Owned(CompValue::Value(nv.as_obj())),inp_nv)))
+                }
+            },
+            OptRef::Ref(&CompValue::Pointer(ref vx)) => {
+                let rvx = OptRef::Ref(vx);
+                let rvy = match y {
+                    OptRef::Ref(&CompValue::Pointer(ref vy))
+                        => OptRef::Ref(vy),
+                    OptRef::Owned(CompValue::Pointer(vy))
+                        => OptRef::Owned(vy),
+                    _ => return Ok(None)
+                };
+                match Ptr::combine(rvx,rvy,inp_x,inp_y,
+                                   comb,only_l,only_r,em)? {
+                    None => Ok(None),
+                    Some((nv,inp_nv)) => Ok(Some((OptRef::Owned(CompValue::Pointer(nv.as_obj())),inp_nv)))
+                }
+            },
+            OptRef::Owned(CompValue::Pointer(vx)) => {
+                let rvx = OptRef::Owned(vx);
+                let rvy = match y {
+                    OptRef::Ref(&CompValue::Pointer(ref vy))
+                        => OptRef::Ref(vy),
+                    OptRef::Owned(CompValue::Pointer(vy))
+                        => OptRef::Owned(vy),
+                    _ => return Ok(None)
+                };
+                match Ptr::combine(rvx,rvy,inp_x,inp_y,
+                                   comb,only_l,only_r,em)? {
+                    None => Ok(None),
+                    Some((nv,inp_nv)) => Ok(Some((OptRef::Owned(CompValue::Pointer(nv.as_obj())),inp_nv)))
+                }
+            },
+            OptRef::Ref(&CompValue::Vector(ref vx)) => {
+                let rvx = OptRef::Ref(vx);
+                let rvy = match y {
+                    OptRef::Ref(&CompValue::Vector(ref vy))
+                        => OptRef::Ref(vy),
+                    OptRef::Owned(CompValue::Vector(vy))
+                        => OptRef::Owned(vy),
+                    _ => return Ok(None)
+                };
+                match Vec::combine(rvx,rvy,inp_x,inp_y,
+                                   comb,only_l,only_r,em)? {
+                    None => Ok(None),
+                    Some((nv,inp_nv)) => Ok(Some((OptRef::Owned(CompValue::Vector(nv.as_obj())),inp_nv)))
+                }
+            },
+            OptRef::Owned(CompValue::Vector(vx)) => {
+                let rvx = OptRef::Owned(vx);
+                let rvy = match y {
+                    OptRef::Ref(&CompValue::Vector(ref vy))
+                        => OptRef::Ref(vy),
+                    OptRef::Owned(CompValue::Vector(vy))
+                        => OptRef::Owned(vy),
+                    _ => return Ok(None)
+                };
+                match Vec::combine(rvx,rvy,inp_x,inp_y,
+                                   comb,only_l,only_r,em)? {
+                    None => Ok(None),
+                    Some((nv,inp_nv)) => Ok(Some((OptRef::Owned(CompValue::Vector(nv.as_obj())),inp_nv)))
+                }
             }
         }
     }
@@ -720,7 +799,14 @@ impl<Ptr : Bytes+Clone,V : Bytes+Clone> Bytes for CompValue<Ptr,V> {
     fn byte_width(&self) -> usize {
         match self {
             &CompValue::Value(ref v) => v.byte_width(),
-            &CompValue::Pointer(ref p) => p.byte_width()
+            &CompValue::Pointer(ref p) => p.byte_width(),
+            &CompValue::Vector(ref v) => {
+                let mut acc = 0;
+                for el in v.iter() {
+                    acc+=el.byte_width()
+                }
+                acc
+            }
         }
     }
     fn extract_bytes<'a,Em : Embed>(x: OptRef<'a,Self>,
@@ -729,17 +815,66 @@ impl<Ptr : Bytes+Clone,V : Bytes+Clone> Bytes for CompValue<Ptr,V> {
                                     len: usize,
                                     em: &mut Em)
                                     -> Result<Option<(OptRef<'a,Self>,Transf<Em>)>,Em::Error> {
-        let rx = CompValue::lower(x);
-        match rx {
-            CompValue::Value(vx) => match V::extract_bytes(vx,inp_x,start,len,em)? {
+        match x {
+            OptRef::Ref(&CompValue::Value(ref vx)) => match V::extract_bytes(OptRef::Ref(vx),inp_x,start,len,em)? {
                 None => Ok(None),
                 Some((nvx,inp_nvx)) => Ok(Some((OptRef::Owned(CompValue::Value(nvx.as_obj())),
-                                                inp_nvx))),
+                                                inp_nvx)))
             },
-            CompValue::Pointer(px) => match Ptr::extract_bytes(px,inp_x,start,len,em)? {
+            OptRef::Owned(CompValue::Value(vx)) => match V::extract_bytes(OptRef::Owned(vx),inp_x,start,len,em)? {
                 None => Ok(None),
-                Some((npx,inp_npx)) => Ok(Some((OptRef::Owned(CompValue::Pointer(npx.as_obj())),
-                                                inp_npx)))
+                Some((nvx,inp_nvx)) => Ok(Some((OptRef::Owned(CompValue::Value(nvx.as_obj())),
+                                                inp_nvx)))
+            },
+            OptRef::Ref(&CompValue::Pointer(ref vx)) => match Ptr::extract_bytes(OptRef::Ref(vx),inp_x,start,len,em)? {
+                None => Ok(None),
+                Some((nvx,inp_nvx)) => Ok(Some((OptRef::Owned(CompValue::Pointer(nvx.as_obj())),
+                                                inp_nvx)))
+            },
+            OptRef::Owned(CompValue::Pointer(vx)) => match Ptr::extract_bytes(OptRef::Owned(vx),inp_x,start,len,em)? {
+                None => Ok(None),
+                Some((nvx,inp_nvx)) => Ok(Some((OptRef::Owned(CompValue::Pointer(nvx.as_obj())),
+                                                inp_nvx)))
+            },
+            OptRef::Ref(&CompValue::Vector(ref vx)) => {
+                let mut acc = 0;
+                let mut off = 0;
+                for el in vx.iter() {
+                    let sz = el.byte_width();
+                    let nel = el.num_elem();
+                    if start >= acc {
+                        if len + start - acc > sz {
+                            return Ok(None)
+                        } else {
+                            return CompValue::extract_bytes(OptRef::Ref(el),
+                                                            Transformation::view(off,nel,inp_x),
+                                                            start-acc,len,em)
+                        }
+                    }
+                    acc+=sz;
+                    off+=nel;
+                }
+                Ok(None)
+            },
+            OptRef::Owned(CompValue::Vector(mut vx)) => {
+                let mut acc = 0;
+                let mut off = 0;
+                for el in vx.drain(..) {
+                    let sz = el.byte_width();
+                    let nel = el.num_elem();
+                    if start >= acc {
+                        if len + start - acc > sz {
+                            return Ok(None)
+                        } else {
+                            return CompValue::extract_bytes(OptRef::Owned(el),
+                                                            Transformation::view(off,nel,inp_x),
+                                                            start-acc,len,em)
+                        }
+                    }
+                    acc+=sz;
+                    off+=nel;
+                }
+                Ok(None)
             }
         }
     }
@@ -834,6 +969,29 @@ impl<'a,C : Composite+Clone> Bytes for ByteWidth<C> {
                                     _:&mut Em)
                                     -> Result<Option<(OptRef<'b,Self>,Transf<Em>)>,Em::Error> {
         Ok(None)
+    }
+
+}
+
+impl<Ptr : Composite+Clone,V : Composite+Clone> Vector for CompValue<Ptr,V> {
+    fn vector<'a,Em : Embed>(vec: OptRef<'a,Vec<Self>>,
+                             inp_vec: Vec<Transf<Em>>,
+                             em: &mut Em)
+                             -> Result<(OptRef<'a,Self>,Transf<Em>),Em::Error> {
+        Ok((OptRef::Owned(CompValue::Vector(vec.as_obj())),
+            Transformation::concat(&inp_vec)))
+    }
+}
+
+impl<'a,Ptr : Bytes+Pointer<'a>+Clone,V : Bytes+IntValue+Vector+Clone> FromConst<'a> for CompValue<Ptr,V> {
+    fn from_const<'b,Em : Embed>(dl: &'a DataLayout,
+                                 c: &'a llvm_ir::Constant,
+                                 tp: &'a Type,
+                                 tps: &'a HashMap<String,Type>,
+                                 em: &mut Em)
+                                 -> Result<Option<(Self,Transf<Em>)>,Em::Error> {
+        let res = translate_constant(dl,c,tp,tps,em)?;
+        Ok(Some(res))
     }
 
 }

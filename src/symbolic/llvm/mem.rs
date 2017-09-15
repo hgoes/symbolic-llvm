@@ -29,12 +29,12 @@ pub enum MemObj<'a,V : Composite> {
 pub struct MemSlice<'a,V : Composite>(Vec<MemObj<'a,V>>);
 
 pub trait FromConst<'a> : Composite {
-    fn from_const<'b,Em : Embed>(&'a DataLayout,
-                                 &'a llvm_ir::Constant,
-                                 &'a LLVMType,
-                                 &'a HashMap<String,LLVMType>,
-                                 &mut Em)
-                                 -> Result<Option<(OptRef<'b,Self>,Transf<Em>)>,Em::Error>;
+    fn from_const<Em : Embed>(&'a DataLayout,
+                              &'a llvm_ir::Constant,
+                              &'a LLVMType,
+                              &'a HashMap<String,LLVMType>,
+                              &mut Em)
+                              -> Result<Option<(Self,Transf<Em>)>,Em::Error>;
 }
 
 impl<'a,V : Composite> MemSlice<'a,V> {
@@ -62,10 +62,20 @@ impl<'a,V : Bytes+FromConst<'a>> MemObj<'a,V> {
         match obj {
             OptRef::Ref(&MemObj::FreshObj(_)) |
             OptRef::Owned(MemObj::FreshObj(_)) => Ok(None),
-            OptRef::Ref(&MemObj::ConstObj(ref dl,ref c,ref tp,ref tps))
-                => V::from_const(dl,c,tp,tps,em),
-            OptRef::Owned(MemObj::ConstObj(dl,c,tp,tps))
-                => V::from_const(dl,c,tp,tps,em),
+            OptRef::Ref(&MemObj::ConstObj(ref dl,ref c,ref tp,ref tps)) => {
+                let res = V::from_const(dl,c,tp,tps,em)?;
+                match res {
+                    None => Ok(None),
+                    Some((x,inp_x)) => Ok(Some((OptRef::Owned(x),inp_x)))
+                }
+            },
+            OptRef::Owned(MemObj::ConstObj(dl,c,tp,tps)) => {
+                let res = V::from_const(dl,c,tp,tps,em)?;
+                match res {
+                    None => Ok(None),
+                    Some((x,inp_x)) => Ok(Some((OptRef::Owned(x),inp_x)))
+                }
+            },
             OptRef::Ref(&MemObj::ValueObj(ref v))
                 => Ok(Some((OptRef::Ref(v),inp))),
             OptRef::Owned(MemObj::ValueObj(v))
@@ -226,27 +236,28 @@ impl<'a,V : Bytes+FromConst<'a>+Clone> Composite for MemSlice<'a,V> {
                             None => return Ok(None),
                             Some(r) => r
                         };
-                        let w1 = v1.as_ref().byte_width();
-                        let w2 = v2.as_ref().byte_width();
+                        let w1 = v1.byte_width();
+                        let w2 = v2.byte_width();
                         match w1.cmp(&w2) {
-                            Ordering::Equal => match V::combine(v1,
-                                                                v2,
-                                                                inp_v1,
-                                                                inp_v2,
-                                                                comb,only_l,only_r,em)? {
-                                None => return Ok(None),
-                                Some((nv,inp)) => {
-                                    nslice.push(MemObj::ValueObj(nv.as_obj()));
-                                    ninp.push(inp);
-                                    cur_x = None;
-                                    cur_y = None;
-                                }
-                            },
-                            Ordering::Less => match V::extract_bytes(v2.to_ref(),inp_v2.clone(),0,w1,em)? {
-                                None => return Ok(None),
-                                Some((spl1,inp1)) => match V::extract_bytes(v2.to_ref(),inp_v2,w1,w2-w1,em)? {
+                            Ordering::Equal
+                                => match V::combine(OptRef::Owned(v1),
+                                                    OptRef::Owned(v2),
+                                                    inp_v1,
+                                                    inp_v2,
+                                                    comb,only_l,only_r,em)? {
                                     None => return Ok(None),
-                                    Some((spl2,inp2)) => match V::combine(v1,spl1,
+                                    Some((nv,inp)) => {
+                                        nslice.push(MemObj::ValueObj(nv.as_obj()));
+                                        ninp.push(inp);
+                                        cur_x = None;
+                                        cur_y = None;
+                                    }
+                                },
+                            Ordering::Less => match V::extract_bytes(OptRef::Ref(&v2),inp_v2.clone(),0,w1,em)? {
+                                None => return Ok(None),
+                                Some((spl1,inp1)) => match V::extract_bytes(OptRef::Ref(&v2),inp_v2,w1,w2-w1,em)? {
+                                    None => return Ok(None),
+                                    Some((spl2,inp2)) => match V::combine(OptRef::Owned(v1),spl1,
                                                                           inp_v1,inp1,
                                                                           comb,only_l,only_r,em)? {
                                         None => return Ok(None),
@@ -259,11 +270,11 @@ impl<'a,V : Bytes+FromConst<'a>+Clone> Composite for MemSlice<'a,V> {
                                     }
                                 }
                             },
-                            Ordering::Greater => match V::extract_bytes(v1.to_ref(),inp_v1.clone(),0,w2,em)? {
+                            Ordering::Greater => match V::extract_bytes(OptRef::Ref(&v1),inp_v1.clone(),0,w2,em)? {
                                 None => return Ok(None),
-                                Some((spl1,inp1)) => match V::extract_bytes(v1.to_ref(),inp_v1,w2,w1-w2,em)? {
+                                Some((spl1,inp1)) => match V::extract_bytes(OptRef::Ref(&v1),inp_v1,w2,w1-w2,em)? {
                                     None => return Ok(None),
-                                    Some((spl2,inp2)) => match V::combine(spl1,v2,
+                                    Some((spl2,inp2)) => match V::combine(spl1,OptRef::Owned(v2),
                                                                           inp1,inp_v2,
                                                                           comb,only_l,only_r,em)? {
                                         None => return Ok(None),
@@ -284,11 +295,11 @@ impl<'a,V : Bytes+FromConst<'a>+Clone> Composite for MemSlice<'a,V> {
                             None => return Ok(None),
                             Some(r) => r
                         };
-                        let w1 = v1.as_ref().byte_width();
+                        let w1 = v1.byte_width();
                         let w2 = v2.byte_width();
                         match w1.cmp(&w2) {
-                            Ordering::Equal => match V::combine(v1,
-                                                                OptRef::Ref(&v2),
+                            Ordering::Equal => match V::combine(OptRef::Owned(v1),
+                                                                OptRef::Owned(v2),
                                                                 inp_v1,
                                                                 inp_v2,
                                                                 comb,only_l,only_r,em)? {
@@ -304,7 +315,7 @@ impl<'a,V : Bytes+FromConst<'a>+Clone> Composite for MemSlice<'a,V> {
                                 None => return Ok(None),
                                 Some((spl1,inp1)) => match V::extract_bytes(OptRef::Ref(&v2),inp_v2,w1,w2-w1,em)? {
                                     None => return Ok(None),
-                                    Some((spl2,inp2)) => match V::combine(v1,spl1,
+                                    Some((spl2,inp2)) => match V::combine(OptRef::Owned(v1),spl1,
                                                                           inp_v1,inp1,
                                                                           comb,only_l,only_r,em)? {
                                         None => return Ok(None),
@@ -317,9 +328,9 @@ impl<'a,V : Bytes+FromConst<'a>+Clone> Composite for MemSlice<'a,V> {
                                     }
                                 }
                             },
-                            Ordering::Greater => match V::extract_bytes(v1.to_ref(),inp_v1.clone(),0,w2,em)? {
+                            Ordering::Greater => match V::extract_bytes(OptRef::Ref(&v1),inp_v1.clone(),0,w2,em)? {
                                 None => return Ok(None),
-                                Some((spl1,inp1)) => match V::extract_bytes(v1.to_ref(),inp_v1,w2,w1-w2,em)? {
+                                Some((spl1,inp1)) => match V::extract_bytes(OptRef::Ref(&v1),inp_v1,w2,w1-w2,em)? {
                                     None => return Ok(None),
                                     Some((spl2,inp2)) => match V::combine(spl1,OptRef::Ref(&v2),
                                                                           inp1,inp_v2,

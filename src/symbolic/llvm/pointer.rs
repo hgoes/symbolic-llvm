@@ -17,14 +17,15 @@ pub type BasePointer<'a> = Choice<(PointerTrg<'a>,Offset)>;
 pub type Offset = (Data<(usize,usize)>,Option<Singleton>);
 
 pub fn base_pointer_global<'a,'b,Em>(name: &'a String,em: &mut Em)
-                                     -> Result<(OptRef<'b,BasePointer<'a>>,
+                                     -> Result<(BasePointer<'a>,
                                                 Transf<Em>),Em::Error>
     where Em : Embed {
     let (ch0,inp_ch0) = choice_empty();
-    choice_insert(ch0,inp_ch0,Transformation::const_bool(true,em)?,
-                  OptRef::Owned((PointerTrg::Global(name),
-                                 (Data((0,0)),None))),
-                  Transformation::id(0))
+    let (ch,inp_ch) = choice_insert(ch0,inp_ch0,Transformation::const_bool(true,em)?,
+                                    OptRef::Owned((PointerTrg::Global(name),
+                                                   (Data((0,0)),None))),
+                                    Transformation::id(0))?;
+    Ok((ch.as_obj(),inp_ch))
 }
 
 pub fn base_pointer_gep<'a,'b,'c,Em : Embed>(ptr: OptRef<'a,BasePointer<'b>>,
