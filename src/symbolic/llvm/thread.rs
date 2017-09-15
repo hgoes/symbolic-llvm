@@ -3,7 +3,7 @@ extern crate smtrs;
 use self::smtrs::composite::*;
 use self::smtrs::embed::{Embed,DeriveConst,DeriveValues};
 use self::smtrs::domain::{Domain};
-use super::mem::{Bytes};
+use super::mem::{Bytes,FromConst};
 use super::frame::{CallFrame,Frame,FrameId};
 use super::{InstructionRef};
 use std::fmt::Debug;
@@ -30,7 +30,7 @@ pub fn get_top_call_frame<'a,'b,V,Em>(cfs: OptRef<'a,CallStack<'b,V>>,
                                       exprs: &[Em::Expr],
                                       em: &mut Em)
                                       -> Result<Option<(OptRef<'a,CallFrame<'b,V>>,Transf<Em>)>,Em::Error>
-    where V : Bytes+Clone,Em : DeriveConst {
+    where V : Bytes+FromConst<'b>+Clone,Em : DeriveConst {
     match assoc_get(cfs,cfs_inp,cf_id)? {
         None => Ok(None),
         Some((st,st_inp)) => match bv_vec_stack_get_top(st,st_inp,exprs,em)? {
@@ -74,7 +74,7 @@ fn thread_get_call_stack<'a,'b,V,Em>(thr: OptRef<'a,Thread<'b,V>>,
                                      -> (OptRef<'a,Assoc<CallId<'b>,
                                                          BitVecVectorStack<(CallFrame<'b,V>,Frame<'b,V>)>>>,
                                          Transf<Em>)
-    where V : Bytes+Clone,Em : Embed {
+    where V : Bytes+FromConst<'b>+Clone,Em : Embed {
     let sz = thr.as_ref().call_stack.num_elem();
     let cs = match thr {
         OptRef::Ref(ref rthr) => OptRef::Ref(&rthr.call_stack),
@@ -89,7 +89,7 @@ fn thread_get_stack<'a,'b,V,Em>(thr: OptRef<'a,Thread<'b,V>>,
                                 -> (OptRef<'a,Assoc<InstructionRef<'b>,
                                                     BitVecVectorStack<Frame<'b,V>>>>,
                                     Transf<Em>)
-    where V : Bytes+Clone,Em : Embed {
+    where V : Bytes+FromConst<'b>+Clone,Em : Embed {
     let off = thr.as_ref().call_stack.num_elem();
     let sz = thr.as_ref().stack.num_elem();
     let st = match thr {
@@ -104,7 +104,7 @@ fn thread_get_stack_top<'a,'b,V,Em>(thr: OptRef<'a,Thread<'b,V>>,
                                     thr_inp: Transf<Em>)
                                     -> (OptRef<'a,Choice<Data<Option<FrameId<'b>>>>>,
                                         Transf<Em>)
-    where V : Bytes+Clone,Em : Embed {
+    where V : Bytes+FromConst<'b>+Clone,Em : Embed {
     let off = thr.as_ref().call_stack.num_elem() +
         thr.as_ref().stack.num_elem();
     let sz = thr.as_ref().stack_top.num_elem();
@@ -123,7 +123,7 @@ pub fn thread_get_frame<'a,'b,V,Em>(thr: OptRef<'a,Thread<'b,V>>,
                                     exprs: &[Em::Expr],
                                     em: &mut Em)
                                     -> Result<Option<(OptRef<'a,Frame<'b,V>>,Transf<Em>)>,Em::Error>
-    where V : Bytes+Clone,Em : DeriveConst {
+    where V : Bytes+FromConst<'b>+Clone,Em : DeriveConst {
 
     match fr_id {
         &FrameId::Call(ref cs_id) => {
@@ -155,7 +155,7 @@ pub fn thread<'a,'b,'c,V,Em>(cs: OptRef<'a,CallStack<'b,V>>,
                              ret: OptRef<'a,Option<V>>,
                              inp_ret: Transf<Em>)
                              -> (OptRef<'c,Thread<'b,V>>,Transf<Em>)
-    where V : Bytes+Clone,Em : Embed {
+    where V : Bytes+FromConst<'b>+Clone,Em : Embed {
     debug_assert_eq!(cs.as_ref().num_elem(),inp_cs.size());
     debug_assert_eq!(st.as_ref().num_elem(),inp_st.size());
     debug_assert_eq!(top.as_ref().num_elem(),inp_top.size());
@@ -178,7 +178,7 @@ pub fn decompose_thread<'a,'b,V,Em>(thr: OptRef<'a,Thread<'b,V>>,
                                         Transf<Em>,
                                         OptRef<'a,Option<V>>,
                                         Transf<Em>)
-    where V : Bytes + Clone,Em : Embed {
+    where V : Bytes+FromConst<'b>+Clone,Em : Embed {
     let (cs,st,top,ret) = match thr {
         OptRef::Ref(ref rthr)
             => (OptRef::Ref(&rthr.call_stack),
@@ -202,7 +202,7 @@ pub fn decompose_thread<'a,'b,V,Em>(thr: OptRef<'a,Thread<'b,V>>,
     (cs,inp_cs,st,inp_st,top,inp_top,ret,inp_ret)
 }
 
-impl<'b,V : Bytes + Clone> Composite for Thread<'b,V> {
+impl<'b,V : Bytes+FromConst<'b>+Clone> Composite for Thread<'b,V> {
     fn num_elem(&self) -> usize {
         self.call_stack.num_elem() +
             self.stack.num_elem() +

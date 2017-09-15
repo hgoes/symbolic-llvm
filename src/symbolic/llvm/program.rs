@@ -1,9 +1,10 @@
 extern crate smtrs;
+extern crate llvm_ir;
 
 use self::smtrs::composite::*;
 use self::smtrs::embed::{Embed,DeriveConst,DeriveValues};
 use self::smtrs::domain::{Domain};
-use super::mem::{Bytes,MemSlice};
+use super::mem::{Bytes,FromConst,MemSlice};
 use super::{InstructionRef};
 use super::thread::{Thread,thread_get_frame};
 use super::frame::frame_get_allocations;
@@ -18,9 +19,9 @@ pub type ThreadId<'a> = (Option<InstructionRef<'a>>,&'a String);
 pub type Threads<'a,V> = Assoc<ThreadId<'a>,
                                Vec<Thread<'a,V>>>;
 
-pub type Globals<'a,V> = Assoc<&'a String,MemSlice<V>>;
+pub type Globals<'a,V> = Assoc<&'a String,MemSlice<'a,V>>;
 
-pub type Heap<'a,V> = Assoc<InstructionRef<'a>,Vec<MemSlice<V>>>;
+pub type Heap<'a,V> = Assoc<InstructionRef<'a>,Vec<MemSlice<'a,V>>>;
 
 pub type Step<'a> = Choice<(Data<ThreadId<'a>>,
                             SingletonBitVec)>;
@@ -40,7 +41,7 @@ pub struct ProgramInput<'a,V : Bytes + Clone> {
     nondet: Nondet<'a,V>
 }
 
-impl<'a,V : Bytes+Clone> Program<'a,V> {
+impl<'a,V : Bytes+FromConst<'a>+Clone> Program<'a,V> {
     pub fn new() -> Self {
         Program { threads: Assoc::new(),
                   global: Assoc::new(),
@@ -77,7 +78,7 @@ pub fn program_get_thread<'a,'b,V,Em>(prog: OptRef<'a,Program<'b,V>>,
                                       exprs: &[Em::Expr],
                                       em: &mut Em)
                                       -> Result<Option<(OptRef<'a,Thread<'b,V>>,Transf<Em>)>,Em::Error>
-    where V : Bytes + Clone, Em : DeriveConst {
+    where V : Bytes+FromConst<'b>+Clone, Em : DeriveConst {
 
     let (threads,threads_inp) = program_get_threads(prog,prog_inp);
     match assoc_get(threads,threads_inp,thread_id)? {
@@ -94,8 +95,8 @@ pub fn program_get_ptr_trg<'a,'b,V,Em>(trg: OptRef<'a,PointerTrg<'b>>,
                                        inp_errs: Transf<Em>,
                                        exprs: &[Em::Expr],
                                        em: &mut Em)
-                                       -> Result<(Option<(OptRef<'a,MemSlice<V>>,Transf<Em>)>,OptRef<'a,Errors<'b>>,Transf<Em>),Em::Error>
-    where V : Bytes + Clone, Em : DeriveConst {
+                                       -> Result<(Option<(OptRef<'a,MemSlice<'b,V>>,Transf<Em>)>,OptRef<'a,Errors<'b>>,Transf<Em>),Em::Error>
+    where V : Bytes+FromConst<'b>+Clone, Em : DeriveConst {
     match trg.as_ref() {
         &PointerTrg::Null => {
             let (nerrs,ninp_errs) = add_error(errs,inp_errs,&Error::NullPointerDeref,em)?;
@@ -171,8 +172,8 @@ pub fn program_get_ptr_trg<'a,'b,V,Em>(trg: OptRef<'a,PointerTrg<'b>>,
 
 fn program_get_threads<'a,'b,V,Em>(prog: OptRef<'a,Program<'b,V>>,
                                    inp_prog: Transf<Em>)
-                                   -> (OptRef<'a,Assoc<(Option<InstructionRef<'b>>,&'b String),Vec<Thread<'b,V>>>>,Transf<Em>)
-    where V : Bytes+Clone,Em : Embed {
+                                   -> (OptRef<'a,Assoc<ThreadId<'b>,Vec<Thread<'b,V>>>>,Transf<Em>)
+    where V : Bytes+FromConst<'b>+Clone,Em : Embed {
     let sz = prog.as_ref().threads.num_elem();
     let thr = match prog {
         OptRef::Ref(ref rprog) => OptRef::Ref(&rprog.threads),
@@ -182,10 +183,10 @@ fn program_get_threads<'a,'b,V,Em>(prog: OptRef<'a,Program<'b,V>>,
     (thr,thr_inp)
 }
 
-fn program_get_global<'a,V,Em>(prog: OptRef<'a,Program<'a,V>>,
-                               inp_prog: Transf<Em>)
-                               -> (OptRef<'a,Assoc<&'a String,MemSlice<V>>>,Transf<Em>)
-    where V : Bytes+Clone,Em : Embed {
+fn program_get_global<'a,'b,V,Em>(prog: OptRef<'a,Program<'b,V>>,
+                                  inp_prog: Transf<Em>)
+                                  -> (OptRef<'a,Assoc<&'b String,MemSlice<'b,V>>>,Transf<Em>)
+    where V : Bytes+FromConst<'b>+Clone,Em : Embed {
     let off = prog.as_ref().threads.num_elem();
     let sz = prog.as_ref().global.num_elem();
     let glb = match prog {
@@ -196,10 +197,10 @@ fn program_get_global<'a,V,Em>(prog: OptRef<'a,Program<'a,V>>,
     (glb,glb_inp)
 }
 
-fn program_get_heap<'a,V,Em>(prog: OptRef<'a,Program<'a,V>>,
-                             inp_prog: Transf<Em>)
-                             -> (OptRef<'a,Assoc<InstructionRef<'a>,Vec<MemSlice<V>>>>,Transf<Em>)
-    where V : Bytes+Clone,Em : Embed {
+fn program_get_heap<'a,'b,V,Em>(prog: OptRef<'a,Program<'b,V>>,
+                                inp_prog: Transf<Em>)
+                                -> (OptRef<'a,Assoc<InstructionRef<'b>,Vec<MemSlice<'b,V>>>>,Transf<Em>)
+    where V : Bytes+FromConst<'b>+Clone,Em : Embed {
     let off = prog.as_ref().threads.num_elem() +
         prog.as_ref().global.num_elem();
     let sz = prog.as_ref().heap.num_elem();
@@ -218,7 +219,7 @@ pub fn program<'a,'b,'c,V,Em>(thrs: OptRef<'a,Threads<'b,V>>,
                               heap: OptRef<'a,Heap<'b,V>>,
                               inp_heap: Transf<Em>)
                               -> (OptRef<'c,Program<'b,V>>,Transf<Em>)
-    where V : Bytes + Clone,Em : Embed {
+    where V : Bytes+FromConst<'b>+Clone,Em : Embed {
     debug_assert_eq!(thrs.as_ref().num_elem(),inp_thrs.size());
     debug_assert_eq!(glob.as_ref().num_elem(),inp_glob.size());
     debug_assert_eq!(heap.as_ref().num_elem(),inp_heap.size());
@@ -253,7 +254,7 @@ pub fn decompose_program<'a,'b,V,Em>(prog: OptRef<'a,Program<'b,V>>,
                                          Transf<Em>,
                                          OptRef<'a,Heap<'b,V>>,
                                          Transf<Em>)
-    where V : Bytes + Clone,Em : Embed {
+    where V : Bytes+FromConst<'b>+Clone,Em : Embed {
     let (thrs,glob,hp) = match prog {
         OptRef::Ref(ref prog)
             => (OptRef::Ref(&prog.threads),
@@ -285,7 +286,7 @@ fn decompose_program_input<'a,'b,V>(x: OptRef<'a,ProgramInput<'b,V>>)
                               OptRef::Owned(rx.nondet))
     }
 }
-impl<'b,V : Bytes + Clone> Composite for Program<'b,V> {
+impl<'b,V : Bytes+FromConst<'b>+Clone> Composite for Program<'b,V> {
     fn num_elem(&self) -> usize {
         self.threads.num_elem() +
             self.global.num_elem() +

@@ -2,7 +2,7 @@ extern crate smtrs;
 
 use self::smtrs::composite::*;
 use self::smtrs::embed::{Embed};
-use super::mem::{Bytes,MemSlice};
+use super::mem::{Bytes,FromConst,MemSlice};
 use super::{InstructionRef};
 use super::thread::CallId;
 use std::fmt::Debug;
@@ -15,7 +15,7 @@ pub enum FrameId<'a> {
 
 pub type PrevFrame<'a> = Choice<Option<Data<FrameId<'a>>>>;
 
-pub type Allocations<'a,V> = Assoc<InstructionRef<'a>,Vec<MemSlice<V>>>;
+pub type Allocations<'a,V> = Assoc<InstructionRef<'a>,Vec<MemSlice<'a,V>>>;
 
 pub type Activation<'a> = Choice<Data<InstructionRef<'a>>>;
 
@@ -38,7 +38,7 @@ pub fn frame<'a,'b,'c,V,Em>(prev: OptRef<'a,PrevFrame<'b>>,
                             alloc: OptRef<'a,Allocations<'b,V>>,
                             inp_alloc: Transf<Em>)
                             -> (OptRef<'c,Frame<'b,V>>,Transf<Em>)
-    where V : Bytes + Clone,Em : Embed {
+    where V : Bytes+FromConst<'b>+Clone,Em : Embed {
     debug_assert_eq!(prev.as_ref().num_elem(),inp_prev.size());
     debug_assert_eq!(alloc.as_ref().num_elem(),inp_alloc.size());
     (OptRef::Owned(Frame { previous: prev.as_obj(),
@@ -53,7 +53,7 @@ pub fn decompose_frame<'a,'b,V,Em>(fr: OptRef<'a,Frame<'b,V>>,
                                        Transf<Em>,
                                        OptRef<'a,Allocations<'b,V>>,
                                        Transf<Em>)
-    where V : Bytes + Clone,Em : Embed {
+    where V : Bytes+FromConst<'b>+Clone,Em : Embed {
     let (prev,alloc) = match fr {
         OptRef::Ref(ref rx) => (OptRef::Ref(&rx.previous),
                                 OptRef::Ref(&rx.allocations)),
@@ -76,7 +76,7 @@ pub fn call_frame<'a,'b,'c,V,Em>(vals: OptRef<'a,Assoc<&'b String,V>>,
                                  phi: OptRef<'a,Choice<Data<&'b String>>>,
                                  inp_phi: Transf<Em>)
                                  -> (OptRef<'c,CallFrame<'b,V>>,Transf<Em>)
-    where V : Bytes+Clone,Em : Embed {
+    where V : Bytes+FromConst<'b>+Clone,Em : Embed {
     debug_assert_eq!(vals.as_ref().num_elem(),inp_vals.size());
     debug_assert_eq!(args.as_ref().num_elem(),inp_args.size());
     debug_assert_eq!(acts.as_ref().num_elem(),inp_acts.size());
@@ -98,7 +98,7 @@ pub fn decompose_callframe<'a,'b,V,Em>(cf: OptRef<'a,CallFrame<'b,V>>,inp_cf: Tr
                                            Transf<Em>,
                                            OptRef<'a,Choice<Data<&'b String>>>,
                                            Transf<Em>)
-    where V : Composite+Clone,Em : Embed {
+    where V : FromConst<'b>+Clone,Em : Embed {
     let (vals,args,acts,phi) = match cf {
         OptRef::Ref(ref cf)
             => (OptRef::Ref(&cf.values),
@@ -126,10 +126,10 @@ pub fn decompose_callframe<'a,'b,V,Em>(cf: OptRef<'a,CallFrame<'b,V>>,inp_cf: Tr
 }
 
 pub fn frame_get_allocations<'a,'b,V,Em>(frame: OptRef<'a,Frame<'b,V>>,
-                                     frame_inp: Transf<Em>)
-                                     -> (OptRef<'a,Assoc<InstructionRef<'a>,Vec<MemSlice<V>>>>,
-                                         Transf<Em>)
-    where V : Bytes+Clone,Em : Embed {
+                                         frame_inp: Transf<Em>)
+                                         -> (OptRef<'a,Assoc<InstructionRef<'b>,Vec<MemSlice<'b,V>>>>,
+                                             Transf<Em>)
+    where V : Bytes+FromConst<'b>+Clone,Em : Embed {
     let off = frame.as_ref().previous.num_elem();
     let sz = frame.as_ref().allocations.num_elem();
     let alloc = match frame {
@@ -144,7 +144,7 @@ pub fn call_frame_get_values<'a,'b,V,Em>(cf: OptRef<'a,CallFrame<'b,V>>,
                                          cf_inp: Transf<Em>)
                                          -> (OptRef<'a,Assoc<&'b String,V>>,
                                              Transf<Em>)
-    where V : Bytes + Clone, Em : Embed {
+    where V : Bytes+FromConst<'b>+Clone, Em : Embed {
     let sz = cf.as_ref().values.num_elem();
     let vals = match cf {
         OptRef::Ref(ref rcf) => OptRef::Ref(&rcf.values),
@@ -155,7 +155,7 @@ pub fn call_frame_get_values<'a,'b,V,Em>(cf: OptRef<'a,CallFrame<'b,V>>,
 }
                                          
 
-impl<'b,V : Bytes + Clone> Composite for Frame<'b,V> {
+impl<'b,V : Bytes+FromConst<'b>+Clone> Composite for Frame<'b,V> {
     fn num_elem(&self) -> usize {
         self.previous.num_elem() +
             self.allocations.num_elem()
@@ -199,7 +199,7 @@ impl<'b,V : Bytes + Clone> Composite for Frame<'b,V> {
     }
 }
 
-impl<'b,V : Composite + Clone> Composite for CallFrame<'b,V> {
+impl<'b,V : Composite+FromConst<'b>+Clone> Composite for CallFrame<'b,V> {
     fn num_elem(&self) -> usize {
         self.values.num_elem() +
             self.arguments.num_elem() +

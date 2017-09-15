@@ -18,7 +18,7 @@ use self::num_bigint::BigInt;
 use self::num_traits::cast::ToPrimitive;
 use std::fmt::Debug;
 use std::collections::HashMap;
-use self::mem::{Bytes,MemSlice};
+use self::mem::{Bytes,FromConst,MemSlice};
 use self::frame::*;
 use self::thread::*;
 use self::program::*;
@@ -72,7 +72,7 @@ pub fn translate_init<'a,'b,V,Em>(module: &'a Module,
                                   inp_args: Transf<Em>,
                                   em: &mut Em)
                                   -> Result<(OptRef<'b,Program<'a,V>>,Transf<Em>),Em::Error>
-    where V : Bytes+Clone, Em : Embed {
+    where V : Bytes+FromConst<'a>+Clone, Em : Embed {
 
     let main_fun = module.functions.get(entry_fun).expect("Entry function not found in module");
     let main_blk = match main_fun.body {
@@ -160,7 +160,7 @@ pub fn translate_instr<'a,'b : 'a,V,Em
                          -> Result<(OptRef<'a,Program<'b,V>>,
                                     Transf<Em>),
                                    TrErr<'b,V,Em::Error>>
-    where V : Bytes+Clone+Pointer<'b>,Em : DeriveValues {
+    where V : Bytes+FromConst<'b>+Clone+Pointer<'b>,Em : DeriveValues {
     let (step,thr_idx) = match program_input_thread_activation(inp.to_ref(),inp_inp,thread_id,em)? {
         Some(r) => r,
         None => {
@@ -302,7 +302,7 @@ pub fn translate_value<'a,'b,V,Em>(dl: &'b DataLayout,
                                    exprs: &[Em::Expr],
                                    em: &mut Em)
                                    -> Result<(OptRef<'a,V>,Transf<Em>),Em::Error>
-    where V : Bytes+Pointer<'b>+IntValue+Vector+Clone,Em : DeriveValues {
+    where V : Bytes+FromConst<'b>+Pointer<'b>+IntValue+Vector+Clone,Em : DeriveValues {
     match value {
         &llvm_ir::Value::Constant(ref c) => {
             let (obj,els) = translate_constant(dl,c,tp,tps,em)?;
