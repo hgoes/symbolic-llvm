@@ -983,7 +983,7 @@ impl<Ptr : Composite+Clone,V : Composite+Clone> Vector for CompValue<Ptr,V> {
     }
 }
 
-impl<'a,Ptr : Bytes+Pointer<'a>+Clone,V : Bytes+IntValue+Vector+Clone> FromConst<'a> for CompValue<Ptr,V> {
+impl<'a,Ptr : Bytes+Pointer<'a>+Clone,V : Bytes+IntValue+Clone> FromConst<'a> for CompValue<Ptr,V> {
     fn from_const<'b,Em : Embed>(dl: &'a DataLayout,
                                  c: &'a llvm_ir::Constant,
                                  tp: &'a Type,
