@@ -18,7 +18,7 @@ use self::num_bigint::BigInt;
 use self::num_traits::cast::ToPrimitive;
 use std::fmt::Debug;
 use std::collections::HashMap;
-use self::mem::{Bytes,FromConst,MemSlice};
+use self::mem::{Bytes,FromConst,MemSlice,MemObj};
 use self::frame::*;
 use self::thread::*;
 use self::program::*;
@@ -134,8 +134,29 @@ pub fn translate_init<'a,'b,V,Em>(module: &'a Module,
                                              &(None,entry_fun),
                                              thread_pool,inp_thread_pool)?;
 
-    let (globals,inp_globals) = assoc_empty()?;
-    // FIXME: Translate globals
+    let (globals0,inp_globals0) = assoc_empty()?;
+    let mut globals = globals0;
+    let mut inp_globals = inp_globals0;
+
+    for (name,glob) in module.globals.iter() {
+        let obj = match glob.initialization {
+            None => {
+                let sz = module.datalayout.type_size_in_bits(&glob.types,&module.types);
+                MemSlice(vec![MemObj::FreshObj(sz as usize)])
+            },
+            Some(ref init) => translate_global(&module.datalayout,
+                                               init,
+                                               &glob.types,
+                                               &module.types)
+        };
+        let (nglobals,inp_nglobals) = assoc_insert(globals,
+                                                   inp_globals,
+                                                   &name,
+                                                   OptRef::Owned(obj),
+                                                   Transformation::id(0))?;
+        globals = nglobals;
+        inp_globals = inp_nglobals;
+    }
 
     let (heap,inp_heap) = assoc_empty()?;
     
@@ -402,6 +423,41 @@ pub fn translate_constant<'b,V,Em>(dl: &'b DataLayout,
             Ok((res.as_obj(),inp_res))
         },
         _ => unimplemented!()
+    }
+}
+
+pub fn translate_global<'b,V>(dl: &'b DataLayout,
+                              c: &'b llvm_ir::Constant,
+                              tp: &'b Type,
+                              mp: &'b HashMap<String,Type>)
+                              -> MemSlice<'b,V>
+    where V : Bytes+Clone {
+    let mut res = Vec::new();
+    translate_global_(dl,c,tp,mp,&mut res);
+    MemSlice(res)
+}
+
+fn translate_global_<'b,V>(dl: &'b DataLayout,
+                           c: &'b llvm_ir::Constant,
+                           tp: &'b Type,
+                           mp: &'b HashMap<String,Type>,
+                           res: &mut Vec<MemObj<'b,V>>)
+                           -> ()
+    where V : Bytes+Clone {
+
+    match c {
+        &llvm_ir::Constant::Array(ref arr) => {
+            let el_tp = match tp {
+                &Type::Array(_,ref subtp) => subtp,
+                _ => panic!("Array value with non-array type")
+            };
+            for el in arr.iter() {
+                translate_global_(dl,el,el_tp,mp,res);
+            }
+        },
+        _ => {
+            res.push(MemObj::ConstObj(dl,c,tp,mp));
+        }
     }
 }
 

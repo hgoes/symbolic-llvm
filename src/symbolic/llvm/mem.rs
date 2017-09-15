@@ -26,7 +26,7 @@ pub enum MemObj<'a,V : Composite> {
 }
 
 #[derive(PartialEq,Eq,Hash,Clone,Debug)]
-pub struct MemSlice<'a,V : Composite>(Vec<MemObj<'a,V>>);
+pub struct MemSlice<'a,V : Composite>(pub Vec<MemObj<'a,V>>);
 
 pub trait FromConst<'a> : Composite {
     fn from_const<Em : Embed>(&'a DataLayout,
