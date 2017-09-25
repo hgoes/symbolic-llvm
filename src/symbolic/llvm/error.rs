@@ -3,7 +3,7 @@ extern crate smtrs;
 use self::smtrs::composite::*;
 use self::smtrs::embed::{Embed};
 use super::{InstructionRef};
-use super::frame::{FrameId};
+use super::frame::{FrameId,ContextId};
 use super::program::{ThreadId};
 
 #[derive(PartialEq,Eq,PartialOrd,Ord,Hash,Clone)]

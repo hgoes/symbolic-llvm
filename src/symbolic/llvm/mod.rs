@@ -28,7 +28,7 @@ use self::llvm_ir::Module;
 use self::llvm_ir::datalayout::{DataLayout};
 use self::llvm_ir::types::{Type};
 
-#[derive(PartialEq,Eq,PartialOrd,Ord,Hash,Clone,Debug)]
+#[derive(PartialEq,Eq,PartialOrd,Ord,Hash,Copy,Clone,Debug)]
 pub struct InstructionRef<'a> {
     basic_block: &'a String,
     instruction: usize
@@ -86,7 +86,7 @@ pub fn translate_init<'a,'b,V,Em>(module: &'a Module,
     
     let (values_main,inp_values_main) = assoc_empty()?;
     let (act_main0,inp_act_main0) = choice_empty();
-    let (act_main,inp_act_main) = choice_insert(act_main0,inp_act_main0,
+    let (act_main,inp_act_main) = choice_insert(OptRef::Owned(act_main0),inp_act_main0,
                                                 Transformation::const_bool(true,em)?,
                                                 OptRef::Owned(Data(InstructionRef { basic_block: main_blk,
                                                                                     instruction: 0 })),
@@ -96,9 +96,9 @@ pub fn translate_init<'a,'b,V,Em>(module: &'a Module,
     let (cf_main,inp_cf_main) = call_frame(values_main,inp_values_main,
                                            OptRef::Owned(args),inp_args,
                                            act_main,inp_act_main,
-                                           phi_main,inp_phi_main);
+                                           OptRef::Owned(phi_main),inp_phi_main);
     let (prev_main0,inp_prev_main0) = choice_empty();
-    let (prev_main,inp_prev_main) = choice_insert(prev_main0,inp_prev_main0,
+    let (prev_main,inp_prev_main) = choice_insert(OptRef::Owned(prev_main0),inp_prev_main0,
                                                   Transformation::const_bool(true,em)?,
                                                   OptRef::Owned(None),
                                                   Transformation::id(0))?;
@@ -114,9 +114,9 @@ pub fn translate_init<'a,'b,V,Em>(module: &'a Module,
                                              css,inp_css)?;
     let (st_main,inp_st_main) = assoc_empty()?;
     let (top_main0,inp_top_main0) = choice_empty();
-    let (top_main,inp_top_main) = choice_insert(top_main0,inp_top_main0,
+    let (top_main,inp_top_main) = choice_insert(OptRef::Owned(top_main0),inp_top_main0,
                                                 Transformation::const_bool(true,em)?,
-                                                OptRef::Owned(Data(Some(FrameId::Call((None,entry_fun))))),
+                                                OptRef::Owned(Data(Some(ContextId::Call((None,entry_fun))))),
                                                 Transformation::id(0))?;
     let ret = OptRef::Owned(None);
     let inp_ret = Transformation::id(0);
@@ -162,179 +162,157 @@ pub fn translate_init<'a,'b,V,Em>(module: &'a Module,
     
     Ok(program(threads,inp_threads,globals,inp_globals,heap,inp_heap))
 }
-                                  
+
+fn filter_ctx_id<'a,V>(cf_id: &CallId<'a>,el: (ThreadView<'a,V>,&Data<Option<ContextId<'a>>>))
+                       -> Option<(ThreadView<'a,V>,ContextId<'a>)> {
+    match (el.1).0 {
+        None => None,
+        Some(ContextId::Call(cid)) => if cid==*cf_id { Some((el.0,ContextId::Call(cid))) } else { None },
+        Some(ContextId::Stack(cid,instr)) => if cid==*cf_id { Some((el.0,ContextId::Stack(cid,instr))) } else { None }
+    }
+}
 
 pub fn translate_instr<'a,'b : 'a,V,Em
                        >(dl: &'b DataLayout,
                          tps: &'b HashMap<String,Type>,
-                         thread_id: &ThreadId<'b>,
-                         cf_id: &CallId<'b>,
-                         instr_id: &InstructionRef<'b>,
+                         thread_id: ThreadId<'b>,
+                         cf_id: CallId<'b>,
+                         instr_id: InstructionRef<'b>,
                          instr: &'b llvm_ir::Instruction,
                          next_instr_id: &InstructionRef<'b>,
-                         prog: OptRef<'a,Program<'b,V>>,
-                         inp: OptRef<'a,ProgramInput<'b,V>>,
+                         prog: &'b Program<'b,V>,
+                         inp: &'b ProgramInput<'b,V>,
                          prog_inp: Transf<Em>,
                          inp_inp: Transf<Em>,
                          exprs: &[Em::Expr],
                          em: &mut Em)
-                         -> Result<(OptRef<'a,Program<'b,V>>,
+                         -> Result<(Program<'b,V>,
                                     Transf<Em>),
                                    TrErr<'b,V,Em::Error>>
-    where V : Bytes+FromConst<'b>+Clone+Pointer<'b>,Em : DeriveValues {
-    let (step,thr_idx) = match program_input_thread_activation(inp.to_ref(),inp_inp,thread_id,em)? {
+    where V : Bytes+FromConst<'b>+IntValue+Vector+Pointer<'b>,Em : DeriveValues {
+    let (step,thr_idx) = match program_input_thread_activation(inp,inp_inp,&thread_id,em)? {
         Some(r) => r,
         None => {
-            let mut rinp = inp.as_obj();
+            let mut rinp = inp.clone();
             rinp.add_thread(thread_id.clone());
             return Err(TrErr::InputNeeded(rinp))
         }
     };
-    let (threads,inp_threads,globals,inp_globals,heap,inp_heap)
-        = decompose_program(prog,prog_inp);
-    let (nthrs,inp_nthrs) = {
-        let (thrs,inp_thrs) = assoc_get(threads.to_ref(),inp_threads.clone(),thread_id)?.expect("Thread not found");
-        let (nthr,inp_nthr) = {
-            let (thr,thr_inp) = get_vec_elem_dyn(thrs.to_ref(),thr_idx.clone(),inp_thrs.clone(),exprs,em)?.expect("Thread not found");
-        
-            let (cs,inp_cs,st,inp_st,top,inp_top,ret,inp_ret) = decompose_thread(thr,thr_inp);
-            let cf_act = call_frame_activation(top.to_ref(),inp_top.clone(),cf_id,em)?;
-            match instr.content {
-                llvm_ir::InstructionC::Alloca(ref name,ref tp,None,_) => {
-                    let sz = dl.type_size_in_bits(tp,tps) / 8;
-                    let mut cur_cs = cs;
-                    let mut cur_inp_cs = inp_cs;
-                    let mut cur_st = st;
-                    let mut cur_inp_st = inp_st;
-                    let (ptr_init,inp_ptr_init) = choice_empty();
-                    let mut ptr : OptRef<'a,BasePointer<'b>> = ptr_init;
-                    let mut inp_ptr : Transf<Em> = inp_ptr_init;
-                    // Iterate over all possible call frames
-                    for (el,cond,inp) in top.as_ref().choices(inp_top.clone()) {
-                        let vcond = &cond.get(exprs,0,em)?;
-                        let always = match em.derive_const(vcond)? {
-                        Some(Value::Bool(false)) => continue,
-                            Some(Value::Bool(true)) => true,
-                            _ => false
-                        };
-                        let rcond = Transformation::and(vec![step.clone(),cf_act.clone(),cond.clone()]);
-                        match el.0 {
-                            None => {},
-                            Some(FrameId::Call(ref id)) => if *id==*cf_id {
-                                let (ncs,inp_ncs) = {
-                                    let (ncfs,inp_ncfs) = {
-                                        let (cfs,inp_cfs) = assoc_get(cur_cs.to_ref(),cur_inp_cs.clone(),cf_id)?.expect("Internal error");
-                                        let (ntup,inp_ntup) = {
-                                            let (tup,inp_tup) = bv_vec_stack_get_top(cfs.to_ref(),inp_cfs.clone(),exprs,em)?.expect("Internal error");
-                                            let (cf,inp_cf,fr,inp_fr) = decompose_tuple(tup,inp_tup);
-                                            let (prev,inp_prev,alloc,inp_alloc) = decompose_frame(fr,inp_fr);
-                                            let (sl,inp_sl) = MemSlice::alloca(sz as usize,em);
-                                            let (pos,nsls,inp_nsls) = match assoc_get(alloc.to_ref(),inp_alloc.clone(),instr_id)? {
-                                                None => (0,OptRef::Owned(vec![sl]),inp_sl),
-                                                Some((sls,inp_sls)) => vec_pool_alloc(OptRef::Owned(sls.as_obj()),OptRef::Owned(sl),inp_sls,inp_sl,&|el,_| el.is_free())?
-                                            };
-                                            let trg = OptRef::Owned((PointerTrg::Heap(instr_id.clone(),INDEX_WIDTH),
-                                                                     offset_zero(INDEX_WIDTH)));
-                                            let inp_trg = {
-                                                let c = em.const_bitvec(INDEX_WIDTH,BigInt::from(pos))?;
-                                                Transformation::constant(vec![c])
-                                            };
-                                            let (nptr,inp_nptr) = choice_insert(ptr,inp_ptr,cond,trg,inp_trg)?;
-                                            ptr = nptr;
-                                            inp_ptr = inp_nptr;
-                                            let (nalloc,inp_nalloc) = assoc_insert(alloc,inp_alloc,instr_id,nsls,inp_nsls)?;
-                                            let (nfr,inp_nfr) = frame(prev,inp_prev,nalloc,inp_nalloc);
-                                            tuple(cf,nfr,inp_cf,inp_nfr)
-                                        };
-                                        bv_vec_stack_set_top(cfs,inp_cfs,ntup,inp_ntup,exprs,em)?.expect("Internal error")
-                                    };
-                                    assoc_insert(cur_cs,cur_inp_cs,cf_id,ncfs,inp_ncfs)?
-                                };
-                                cur_cs = ncs;
-                                cur_inp_cs = inp_ncs;
-                            },
-                            Some(FrameId::Stack(ref id,ref save_call)) => if *id==*cf_id {
-                                unimplemented!()
-                            }
-                        }
-                    }
-                    let (bw,_,_) = dl.pointer_alignment(0);
-                    let (pval,inp_pval) = V::from_pointer((bw/8) as usize,ptr,inp_ptr);
-                    let (ncfs,inp_ncfs) = {
-                        let (cfs,inp_cfs) = assoc_get(cur_cs.to_ref(),cur_inp_cs.clone(),cf_id)?.expect("Internal error");
-                        let cfs_top_bw = cfs.as_ref().top;
-                        let mut accessor_cf = bv_vec_stack_access_top(cfs,inp_cfs,exprs,em)?;
-                        while let Some((cond,cf_tup,inp_cf_tup)) = accessor_cf.next()? {
-                            let cvec = match cond {
-                                None => vec![step.clone(),cf_act.clone()],
-                                Some(ccond) => vec![step.clone(),cf_act.clone(),ccond]
-                            };
-                            let rcond = Transformation::and(cvec);
-                            let (ncf_tup,inp_ncf_tup) = {
-                                let (cf,inp_cf,fr,inp_fr) = decompose_tuple(OptRef::Ref(cf_tup),inp_cf_tup.clone());
-                                let (vals,inp_vals,args,inp_args,acts,inp_acts,phi,inp_phi) = decompose_callframe(cf,inp_cf);
-                                let (nptr,inp_nptr) = match assoc_get(vals.to_ref(),inp_vals.clone(),&name)? {
-                                    None => (pval.to_ref(),inp_pval.clone()),
-                                    Some((oval,inp_oval)) => {
-                                        
-                                        let (nval,inp_nval) = ite(pval.to_ref(),oval,rcond.clone(),inp_pval.clone(),inp_oval,em)?.expect("Cannot merge pointers");
-                                        (nval.to_owned(),inp_nval)
-                                    }
-                                };
-                                let (nacts,inp_nacts) = choice_set_chosen(acts,inp_acts,rcond,
-                                                                          OptRef::Owned(Data(next_instr_id.clone())),
-                                                                          Transformation::id(0))?;
-                                let (nvals,inp_nvals) = assoc_insert(vals,inp_vals,&name,nptr,inp_nptr)?;
-                                let (ncf,inp_ncf) = call_frame(nvals,inp_nvals,args,inp_args,nacts,inp_nacts,phi,inp_phi);
-                                let (ncf_tup,inp_ncf_tup) = tuple(ncf,fr,inp_ncf,inp_fr);
-                                (ncf_tup.as_obj(),inp_ncf_tup)
-                            };
-                            *cf_tup = ncf_tup;
-                            *inp_cf_tup = inp_ncf_tup;
-                        }
-                        let (ncfs_,inp_ncfs) = accessor_cf.finish();
-                        let ncfs = OptRef::Owned(BitVecVectorStack { top: cfs_top_bw,
-                                                                     elements: ncfs_ });
-                        (ncfs,inp_ncfs)
+    let cur_thread_iter
+        = CurrentThreadIter::new(prog,
+                                 thread_id,
+                                 step,
+                                 thr_idx,
+                                 exprs,
+                                 em)?;
+    let mut cur_frame_id = top_frame_id_iter(prog,prog_inp.clone(),cur_thread_iter)
+        .filter(cf_id,filter_ctx_id);
+    let cfs = cur_frame_id.clone().seq((prog,prog_inp.clone(),exprs),frame_id_to_call_frame_iter);
+    let frs = cur_frame_id.seq((prog,prog_inp.clone(),exprs),frame_id_to_frame_iter);
+    let mut ctxs = cfs.product(frs).cond_iter();
+    match instr.content {
+        llvm_ir::InstructionC::Alloca(ref name,ref tp,ref sz,ref align) => {
+            let mut nprog = prog.clone();
+            let mut updates = Vec::new();
+            while let Some((cond,(cf_view,fr_view))) = ctxs.next(em)? {
+                let (cf,cf_inp) = cf_view.get_with_inp(prog,prog_inp.clone());
+                let dyn = match sz {
+                    &None => None,
+                    &Some(ref sz) => Some(translate_value(dl,&sz.val,&sz.tp,tps,cf,cf_inp,exprs,em)?)
+                };
+                let stat_bits = dl.type_size_in_bits(tp,tps);
+                let stat_bytes = (stat_bits/8) as usize;
+                let (sl,sl_inp) = match dyn {
+                    None => MemSlice::alloca(stat_bytes,em),
+                    Some(_) => panic!("Dynamic sized allocations not supported")
+                };
+                let alloc_view = fr_view.clone()
+                    .then(AllocationsView::new())
+                    .then(AssocView::new(instr_id.clone()));
+                let (allocs,allocs_inp) = match alloc_view
+                    .get_opt_with_inp(prog,prog_inp.clone()) {
+                        None => (OptRef::Owned(Vec::new()),
+                                 Transformation::id(0)),
+                        Some((res,res_inp)) => (OptRef::Ref(res),res_inp)
                     };
-                    let (ncs,inp_ncs) = assoc_insert(cur_cs,cur_inp_cs,cf_id,ncfs,inp_ncfs)?;
-                    thread(ncs,inp_ncs,
-                           cur_st,cur_inp_st,
-                           top,inp_top,
-                           ret,inp_ret)
-                    
-                },
-                _ => unimplemented!()
+                let (alloc_idx,nallocs,nallocs_inp)
+                    = vec_pool_alloc(allocs,OptRef::Owned(sl),
+                                     allocs_inp,sl_inp,
+                                     &|_,_| false)?;
+                alloc_view.insert(&mut nprog,nallocs.as_obj(),nallocs_inp,&mut updates);
+                let instr_view = cf_view.clone()
+                    .then(ValuesView::new())
+                    .then(AssocView::new(name));
+                let old_ptr = if cond.len()==0 {
+                    None
+                } else {
+                    instr_view.get_opt_with_inp(prog,prog_inp.clone())
+                };
+                let (ptr1,ptr1_inp) = match old_ptr {
+                    None => {
+                        let (ch,ch_inp) = choice_empty();
+                        (OptRef::Owned(ch),ch_inp)
+                    },
+                    Some((ptr,ptr_inp)) => match V::to_pointer(OptRef::Ref(ptr),ptr_inp) {
+                        None => panic!("Value not a pointer"),
+                        Some(r) => r
+                    }
+                };
+                let rcond = Transformation::and(cond.to_vec());
+                let (trg,trg_inp) = {
+                    let Then(thr_view,fr_view_) = fr_view;
+                    let (thr_id,thr_id_inp) = thread_view_to_idx(&thr_view,INDEX_WIDTH,em)?;
+                    let (fr_id,fr_id_inp) = frame_view_to_idx(&fr_view_,INDEX_WIDTH,em)?;
+                    let trg = PointerTrg::Stack(thr_id,INDEX_WIDTH,
+                                                fr_id,INDEX_WIDTH,
+                                                instr_id.clone(),INDEX_WIDTH);
+                    let e = em.const_bitvec(INDEX_WIDTH,BigInt::from(alloc_idx))?;
+                    let alloc_idx_inp = Transformation::constant(vec![e]);
+                    let trg_inp = Transformation::concat(&[thr_id_inp,
+                                                           fr_id_inp,
+                                                           alloc_idx_inp]);
+                    (trg,trg_inp)
+                };
+                let (ptr2,ptr2_inp) = choice_set_chosen(ptr1,
+                                                        ptr1_inp,
+                                                        rcond.clone(),
+                                                        OptRef::Owned((trg,(Data((stat_bytes,0)),None))),
+                                                        trg_inp)?;
+                let (ptr3,ptr3_inp) = V::from_pointer(dl.pointer_alignment(0).0 as usize,ptr2,ptr2_inp);
+                instr_view.insert(&mut nprog,ptr3.as_obj(),ptr3_inp,&mut updates);
+                let act_view = cf_view.then(ActivationView::new());
+                let (acts,acts_inp) = act_view.get_with_inp(prog,prog_inp.clone());
+                let (nacts,nacts_inp) = choice_set_chosen(OptRef::Ref(acts),acts_inp,rcond,
+                                                          OptRef::Owned(Data(instr_id.next())),
+                                                          Transformation::id(0))?;
+                act_view.write(nacts.as_obj(),nacts_inp,prog,&mut nprog,&mut updates);
             }
-        };
-        set_vec_elem_dyn(thrs,nthr,thr_idx,inp_thrs,inp_nthr,exprs,em)?.expect("Cannot merge thread")
-    };
-    let (nthreads,inp_nthreads) = assoc_insert(threads,inp_threads,thread_id,nthrs,inp_nthrs)?;
-    let (nprog,inp_nprog) = program(nthreads,inp_nthreads,globals,inp_globals,heap,inp_heap);
-    Ok((nprog,inp_nprog))
+            let nprog_inp = finish_updates(updates,prog_inp);
+            Ok((nprog,nprog_inp))
+        },
+        _ => unimplemented!()
+    }
 }
 
 pub fn translate_value<'a,'b,V,Em>(dl: &'b DataLayout,
                                    value: &'b llvm_ir::Value,
-                                   tp: &'b Type,
+                                   tp: &Type,
                                    tps: &'b HashMap<String,Type>,
-                                   cf: OptRef<'a,CallFrame<'b,V>>,
+                                   cf: &'b CallFrame<'b,V>,
                                    cf_inp: Transf<Em>,
                                    exprs: &[Em::Expr],
                                    em: &mut Em)
-                                   -> Result<(OptRef<'a,V>,Transf<Em>),Em::Error>
+                                   -> Result<(V,Transf<Em>),Em::Error>
     where V : Bytes+FromConst<'b>+Pointer<'b>+IntValue+Vector+Clone,Em : DeriveValues {
     match value {
         &llvm_ir::Value::Constant(ref c) => {
             let (obj,els) = translate_constant(dl,c,tp,tps,em)?;
-            Ok((OptRef::Owned(obj),els))
+            Ok((obj,els))
         },
         &llvm_ir::Value::Local(ref name) => {
-            let (vals,vals_inp) = call_frame_get_values(cf,cf_inp);
-            match assoc_get(vals,vals_inp,&name)? {
-                None => panic!("Local name {} not found",name),
-                Some(r) => Ok(r)
-            }
+            let val_view = ValuesView::new().then(AssocView::new(name));
+            let (val,val_inp) = val_view.get_with_inp(cf,cf_inp);
+            Ok((val.clone(),val_inp))
         },
         _ => unimplemented!()
     }
@@ -342,7 +320,7 @@ pub fn translate_value<'a,'b,V,Em>(dl: &'b DataLayout,
 
 pub fn translate_constant<'b,V,Em>(dl: &'b DataLayout,
                                    c: &'b llvm_ir::Constant,
-                                   tp: &'b Type,
+                                   tp: &Type,
                                    mp: &HashMap<String,Type>,
                                    em: &mut Em)
                                    -> Result<(V,Transf<Em>),Em::Error>

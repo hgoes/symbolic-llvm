@@ -1,3 +1,5 @@
+extern crate num_bigint;
+
 pub mod symbolic;
 
 #[cfg(test)]

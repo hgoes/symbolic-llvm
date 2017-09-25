@@ -6,11 +6,13 @@ use self::smtrs::embed::{Embed,DeriveConst,DeriveValues};
 use self::smtrs::domain::{Domain};
 use super::mem::{Bytes,FromConst,MemSlice};
 use super::{InstructionRef};
-use super::thread::{Thread,thread_get_frame};
-use super::frame::frame_get_allocations;
+use super::thread::*;
+use super::frame::*;
 use super::pointer::{PointerTrg};
 use super::error::{Error,Errors,add_error};
+use std::marker::PhantomData;
 use std::fmt::Debug;
+use num_bigint::BigInt;
 
 const STEP_BW: usize = 32;
 
@@ -29,14 +31,14 @@ pub type Step<'a> = Choice<(Data<ThreadId<'a>>,
 pub type Nondet<'a,V> = Assoc<InstructionRef<'a>,V>;
 
 #[derive(PartialEq,Eq,Hash,Clone,Debug)]
-pub struct Program<'a,V : Bytes + Clone> {
+pub struct Program<'a,V> {
     threads: Threads<'a,V>,
     global: Globals<'a,V>,
     heap: Heap<'a,V>
 }
 
 #[derive(PartialEq,Eq,Hash,Clone,Debug)]
-pub struct ProgramInput<'a,V : Bytes + Clone> {
+pub struct ProgramInput<'a,V> {
     step: Step<'a>,
     nondet: Nondet<'a,V>
 }
@@ -59,13 +61,13 @@ impl<'a,V : Bytes+Clone> ProgramInput<'a,V> {
     }
 }
 
-pub fn program_input_thread_activation<'a,'b,V,Em>(inp: OptRef<'a,ProgramInput<'b,V>>,
+pub fn program_input_thread_activation<'a,'b,V,Em>(inp: &ProgramInput<'b,V>,
                                                    inp_inp: Transf<Em>,
                                                    thread_id: &ThreadId<'b>,
                                                    em: &mut Em)
                                                    -> Result<Option<(Transf<Em>,Transf<Em>)>,Em::Error>
     where V : Bytes + Clone, Em : Embed {
-    match inp.as_ref().step.choices(inp_inp).find(|&(&(ref dat,_),_,_)| dat.0==*thread_id) {
+    match inp.step.choices(inp_inp).find(|&(&(ref dat,_),_,_)| dat.0==*thread_id) {
         None => Ok(None),
         Some((_,cond,idx)) => Ok(Some((cond,idx)))
     }
@@ -397,5 +399,448 @@ impl<'b,V : Bytes + Clone> Composite for ProgramInput<'b,V> {
         Ok(Some((OptRef::Owned(ProgramInput { step: step.as_obj(),
                                               nondet: nondet.as_obj() }),
                  Transformation::concat(&[step_inp,nondet_inp]))))
+    }
+}
+
+// Views for Program
+
+#[derive(Clone,PartialEq,Eq)]
+pub struct ThreadsView<'a,V : 'a>(PhantomData<&'a V>);
+
+#[derive(Clone,PartialEq,Eq)]
+pub struct GlobalsView<'a,V : 'a>(PhantomData<&'a V>);
+
+#[derive(Clone,PartialEq,Eq)]
+pub struct HeapView<'a,V : 'a>(PhantomData<&'a V>);
+
+impl<'a,V : 'a+Bytes+FromConst<'a>> View for ThreadsView<'a,V> {
+    type Viewed = Program<'a,V>;
+    type Element = Threads<'a,V>;
+    fn get_el<'b>(&self,prog: &'b Self::Viewed)
+                  -> &'b Self::Element where Self : 'b {
+        &prog.threads
+    }
+    fn get_el_ext<'b>(&self,prog: &'b Self::Viewed)
+                      -> (usize,&'b Self::Element) where Self : 'b {
+        (0,&prog.threads)
+    }
+}
+
+impl<'a,V : 'a+Bytes+FromConst<'a>> View for GlobalsView<'a,V> {
+    type Viewed = Program<'a,V>;
+    type Element = Globals<'a,V>;
+    fn get_el<'b>(&self,prog: &'b Self::Viewed)
+                  -> &'b Self::Element where Self : 'b {
+        &prog.global
+    }
+    fn get_el_ext<'b>(&self,prog: &'b Self::Viewed)
+                      -> (usize,&'b Self::Element) where Self : 'b {
+        (prog.threads.num_elem(),&prog.global)
+    }
+}
+
+impl<'a,V : 'a+Bytes+FromConst<'a>> View for HeapView<'a,V> {
+    type Viewed = Program<'a,V>;
+    type Element = Heap<'a,V>;
+    fn get_el<'b>(&self,prog: &'b Self::Viewed)
+                  -> &'b Self::Element where Self : 'b {
+        &prog.heap
+    }
+    fn get_el_ext<'b>(&self,prog: &'b Self::Viewed)
+                      -> (usize,&'b Self::Element) where Self : 'b {
+        (prog.threads.num_elem()+
+         prog.global.num_elem(),&prog.heap)
+    }
+}
+
+impl<'a,V : 'a+Bytes+FromConst<'a>> ViewMut for ThreadsView<'a,V> {
+    fn get_el_mut<'b>(&self,prog: &'b mut Self::Viewed)
+                      -> &'b mut Self::Element where Self : 'b {
+        &mut prog.threads
+    }
+    fn get_el_mut_ext<'b>(&self,prog: &'b mut Self::Viewed)
+                          -> (usize,&'b mut Self::Element) where Self : 'b {
+        (0,&mut prog.threads)
+    }
+}
+
+impl<'a,V : 'a+Bytes+FromConst<'a>> ViewMut for GlobalsView<'a,V> {
+    fn get_el_mut<'b>(&self,prog: &'b mut Self::Viewed)
+                      -> &'b mut Self::Element where Self : 'b {
+        &mut prog.global
+    }
+    fn get_el_mut_ext<'b>(&self,prog: &'b mut Self::Viewed)
+                          -> (usize,&'b mut Self::Element) where Self : 'b {
+        (prog.threads.num_elem(),&mut prog.global)
+    }
+}
+
+impl<'a,V : 'a+Bytes+FromConst<'a>> ViewMut for HeapView<'a,V> {
+    fn get_el_mut<'b>(&self,prog: &'b mut Self::Viewed)
+                      -> &'b mut Self::Element where Self : 'b {
+        &mut prog.heap
+    }
+    fn get_el_mut_ext<'b>(&self,prog: &'b mut Self::Viewed)
+                          -> (usize,&'b mut Self::Element) where Self : 'b {
+        (prog.threads.num_elem()+
+         prog.global.num_elem(),&mut prog.heap)
+    }
+}
+
+impl<'a,V> ThreadsView<'a,V> {
+    pub fn new() -> Self {
+        ThreadsView(PhantomData)
+    }
+}
+
+impl<'a,V> GlobalsView<'a,V> {
+    pub fn new() -> Self {
+        GlobalsView(PhantomData)
+    }
+}
+
+impl<'a,V> HeapView<'a,V> {
+    pub fn new() -> Self {
+        HeapView(PhantomData)
+    }
+}
+
+pub struct CurrentThreadIter<'a,V,Em : DeriveValues> {
+    phantom: PhantomData<V>,
+    step: Transf<Em>,
+    thr_id: ThreadId<'a>,
+    iter: IndexedIter<Em>
+}
+
+impl<'a,Em : DeriveValues,V : 'a+Bytes+FromConst<'a>+Clone
+     > CurrentThreadIter<'a,V,Em> {
+    pub fn new(prog: &'a Program<'a,V>,
+               thr_id: ThreadId<'a>,
+               step: Transf<Em>,
+               thr_idx: Transf<Em>,
+               exprs: &[Em::Expr],
+               em: &mut Em) -> Result<CurrentThreadIter<'a,V,Em>,Em::Error> {
+        Ok(CurrentThreadIter {
+            phantom: PhantomData,
+            step: step,
+            thr_id: thr_id,
+            iter: access_dyn(prog.threads.access(&thr_id),thr_idx,exprs,em)?
+        })
+    }
+}
+
+impl<'a,V,Em : DeriveValues> Clone for CurrentThreadIter<'a,V,Em> {
+    fn clone(&self) -> Self {
+        CurrentThreadIter {
+            phantom: PhantomData,
+            step: self.step.clone(),
+            thr_id: self.thr_id.clone(),
+            iter: self.iter.clone()
+        }
+    }
+}
+
+pub type ThreadView<'a,V> = Then<ThreadsView<'a,V>,
+                                 Then<AssocView<ThreadId<'a>,Vec<Thread<'a,V>>>,
+                                      VecView<Thread<'a,V>>>>;
+
+pub fn thread_view_to_idx<'a,V,Em : Embed>(view: &ThreadView<'a,V>,bw: usize,em: &mut Em)
+                                           -> Result<(ThreadId<'a>,Transf<Em>),Em::Error> {
+    let &Then(_,Then(ref assoc,ref vec)) = view;
+    let e = em.const_bitvec(bw,BigInt::from(vec.idx))?;
+    let inp = Transformation::constant(vec![e]);
+    Ok((assoc.key.clone(),inp))
+}
+
+impl<'a,Em : DeriveValues,V : 'a> CondIterator<Em> for CurrentThreadIter<'a,V,Em> {
+    type Item = ThreadView<'a,V>;
+    fn next(&mut self,conds: &mut Vec<Transf<Em>>,pos: usize,em: &mut Em)
+            -> Result<Option<Self::Item>,Em::Error> {
+        if conds.len()==pos {
+            conds.push(self.step.clone());
+        }
+        match self.iter.next(conds,pos+1,em)? {
+            None => Ok(None),
+            Some(i) => Ok(Some(Then::new(ThreadsView::new(),
+                                         Then::new(AssocView::new(self.thr_id.clone()),
+                                                   VecView::new(i)))))
+        }
+    }
+}
+
+type TopFrameIdIter<'a,It,V,Em>
+    = SeqPure<It,Context<GetterElement<'a,Choice<Data<Option<ContextId<'a>>>>,
+                                       Chosen<'a,Data<Option<ContextId<'a>>>,Em>>,ThreadView<'a,V>>,
+              (&'a Program<'a,V>,
+               Transf<Em>),
+              fn(&(&'a Program<'a,V>,
+                   Transf<Em>),
+                 ThreadView<'a,V>) -> Context<GetterElement<'a,Choice<Data<Option<ContextId<'a>>>>,
+                                                            Chosen<'a,Data<Option<ContextId<'a>>>,Em>>,ThreadView<'a,V>>>;
+
+pub fn get_frame_id_iter<'a,V,Em>(ctx: &(&'a Program<'a,V>,
+                                         Transf<Em>),
+                                  thr_view: ThreadView<'a,V>)
+                                  -> Context<GetterElement<'a,Choice<Data<Option<ContextId<'a>>>>,
+                                                           Chosen<'a,Data<Option<ContextId<'a>>>,Em>>,ThreadView<'a,V>>
+    where Em : Embed, V : Bytes+FromConst<'a> {
+    
+    let (top_off,top) = thr_view.clone().then(StackTopView::new()).get_el_ext(ctx.0);
+    let top_inp = Transformation::view(top_off,top.num_elem(),ctx.1.clone());
+    top.chosen(top_inp).get_element(top).context(thr_view)
+}
+
+
+pub fn top_frame_id_iter<'a,V,It,Em>(prog: &'a Program<'a,V>,
+                                     prog_inp: Transf<Em>,
+                                     prev: It) -> TopFrameIdIter<'a,It,V,Em>
+    where Em : Embed, It : CondIterator<Em,Item=ThreadView<'a,V>>, V : Bytes+FromConst<'a> {
+    prev.seq_pure((prog,prog_inp),get_frame_id_iter)
+}
+
+//type FrameIdToFrameView<'a,V,It,Em>
+//    = 
+
+pub enum FrameIter<'a,V : 'a,Em : DeriveValues> {
+    Call(BeforeIterator<CallStackView<'a,V>,
+                        BeforeIterator<AssocView<CallId<'a>,
+                                                 BitVecVectorStack<(CallFrame<'a,V>,Frame<'a,V>)>>,
+                                       ThenIterator<SndView<CallFrame<'a,V>,Frame<'a,V>>,
+                                                    BitVecVectorStackAccess<(CallFrame<'a,V>,Frame<'a,V>),Em>>>>),
+    Stack(BeforeIterator<StackView<'a,V>,
+                         BeforeIterator<AssocView<InstructionRef<'a>,
+                                                  BitVecVectorStack<Frame<'a,V>>>,
+                                        BitVecVectorStackAccess<Frame<'a,V>,Em>>>)
+}
+
+impl<'a,V : 'a,Em : DeriveValues> Clone for FrameIter<'a,V,Em> {
+    fn clone(&self) -> Self {
+        match self {
+            &FrameIter::Call(ref it) => FrameIter::Call(it.clone()),
+            &FrameIter::Stack(ref it) => FrameIter::Stack(it.clone())
+        }
+    }
+}
+
+impl<'a,V,Em : DeriveValues> CondIterator<Em> for FrameIter<'a,V,Em>
+    where V : Bytes+FromConst<'a> {
+    
+    type Item = FrameView<'a,V>;
+    fn next(&mut self,conds: &mut Vec<Transf<Em>>,pos: usize,em: &mut Em)
+            -> Result<Option<Self::Item>,Em::Error> {
+        match self {
+            &mut FrameIter::Call(ref mut it) => match it.next(conds,pos,em)? {
+                None => Ok(None),
+                Some(v) => Ok(Some(FrameView::Call(v)))
+            },
+            &mut FrameIter::Stack(ref mut it) => match it.next(conds,pos,em)? {
+                None => Ok(None),
+                Some(v) => Ok(Some(FrameView::Stack(v)))
+            }
+        }
+    }    
+}
+
+pub fn frame_id_to_frame_iter<'a,V,Em>
+    (ctx: &(&Program<'a,V>,Transf<Em>,&[Em::Expr]),
+     el: (ThreadView<'a,V>,ContextId<'a>),
+     em: &mut Em)
+     -> Result<BeforeIterator<ThreadView<'a,V>,
+                              FrameIter<'a,V,Em>>,Em::Error>
+    where Em : DeriveValues, V : 'a+Bytes+FromConst<'a> {
+    let thr_view = el.0;
+    let fr_id = el.1;
+    match fr_id {
+        ContextId::Call(cid) => {
+            let cs_view = thr_view.clone()
+                .then(Then::new(CallStackView::new(),
+                                AssocView::new(cid.clone())));
+            let (cs_off,cs) = cs_view.get_el_ext(&ctx.0);
+            let cs_inp = Transformation::view(cs_off,cs.num_elem(),ctx.1.clone());
+            Ok(FrameIter::Call(cs.access_top(cs_inp,ctx.2,em)?
+                               .then(SndView::new())
+                               .before(AssocView::new(cid.clone()))
+                               .before(CallStackView::new()))
+               .before(thr_view))
+        },
+        ContextId::Stack(cid,instr) => {
+            let st_view = thr_view.clone()
+                .then(Then::new(StackView::new(),
+                                AssocView::new(instr.clone())));
+            let (st_off,st) = st_view.get_el_ext(&ctx.0);
+            let st_inp = Transformation::view(st_off,st.num_elem(),ctx.1.clone());
+            Ok(FrameIter::Stack(st.access_top(st_inp,ctx.2,em)?
+                                .before(AssocView::new(instr.clone()))
+                                .before(StackView::new()))
+               .before(thr_view))
+        }
+    }
+}
+
+type CallFrameIter<'a,V,Em>
+    = BeforeIterator<ThreadView<'a,V>,
+                     BeforeIterator<CallStackView<'a,V>,
+                                    BeforeIterator<AssocView<CallId<'a>,
+                                                             BitVecVectorStack<(CallFrame<'a,V>,Frame<'a,V>)>>,
+                                                   ThenIterator<FstView<CallFrame<'a,V>,Frame<'a,V>>,
+                                                                BitVecVectorStackAccess<(CallFrame<'a,V>,Frame<'a,V>),Em>>>>>;
+
+pub fn frame_id_to_call_frame_iter<'a,V,Em>(ctx: &(&Program<'a,V>,Transf<Em>,&[Em::Expr]),
+                                            el: (ThreadView<'a,V>,ContextId<'a>),
+                                            em: &mut Em)
+                                            -> Result<CallFrameIter<'a,V,Em>,Em::Error>
+    where Em : DeriveValues, V : 'a+Bytes+FromConst<'a> {
+    let thr_view = el.0;
+    let fr_id = el.1;
+    match fr_id {
+        ContextId::Call(cid) |
+        ContextId::Stack(cid,_) => {
+            let cs_view = thr_view.clone()
+                .then(Then::new(CallStackView::new(),
+                                AssocView::new(cid.clone())));
+            let (cs_off,cs) = cs_view.get_el_ext(&ctx.0);
+            let cs_inp = Transformation::view(cs_off,cs.num_elem(),ctx.1.clone());
+            Ok(cs.access_top(cs_inp,ctx.2,em)?
+               .then(FstView::new())
+               .before(AssocView::new(cid.clone()))
+               .before(CallStackView::new())
+               .before(thr_view))
+        }
+    }
+}
+
+pub struct CurrentCallFrameIter<'a,It,V : 'a,Em : DeriveValues>
+    where Em::Expr : 'a {
+    prog: &'a Program<'a,V>,
+    inp_prog: Transf<Em>,
+    thread_iter: It,
+    cf_id: CallId<'a>,
+    exprs: &'a [Em::Expr],
+    cur_iter: Option<(Then<ThreadView<'a,V>,
+                           Then<CallStackView<'a,V>,
+                                AssocView<CallId<'a>,
+                                          BitVecVectorStack<(CallFrame<'a,V>,Frame<'a,V>)>>>>,
+                      usize,&'a BitVecVectorStack<(CallFrame<'a,V>,Frame<'a,V>)>,
+                      BitVecVectorStackAccess<(CallFrame<'a,V>,Frame<'a,V>),Em>,usize)>
+}
+
+impl<'a,It,V,Em : DeriveValues> CurrentCallFrameIter<'a,It,V,Em>
+    where It : CondIterator<Em,Item=ThreadView<'a,V>>,
+          V : 'a+Bytes+FromConst<'a> {
+    pub fn new(prog: &'a Program<'a,V>,
+               inp_prog: Transf<Em>,
+               iter: It,
+               cf_id: CallId<'a>,
+               exprs: &'a [Em::Expr]) -> Self {
+        CurrentCallFrameIter { prog: prog,
+                               inp_prog: inp_prog,
+                               thread_iter: iter,
+                               cf_id: cf_id,
+                               exprs: exprs,
+                               cur_iter: None }
+    }
+    fn take_cur_iter(&mut self,
+                     conds: &mut Vec<Transf<Em>>,
+                     pos: usize,
+                     em: &mut Em)
+                     -> Result<Option<(Then<ThreadView<'a,V>,
+                                            Then<CallStackView<'a,V>,
+                                                 AssocView<CallId<'a>,
+                                                           BitVecVectorStack<(CallFrame<'a,V>,Frame<'a,V>)>>>>,
+                                       usize,&'a BitVecVectorStack<(CallFrame<'a,V>,Frame<'a,V>)>,
+                                       BitVecVectorStackAccess<(CallFrame<'a,V>,
+                                                                Frame<'a,V>),Em>,usize)>,Em::Error> {
+        match self.cur_iter.take() {
+            Some(res) => Ok(Some(res)),
+            None => {
+                conds.truncate(pos);
+                match self.thread_iter.next(conds,pos,em)? {
+                    None => Ok(None),
+                    Some(thr_view) => {
+                        let css_view = CallStackView::new();
+                        let cs_view = Then::new(thr_view,
+                                                Then::new(css_view,
+                                                          AssocView::new(self.cf_id)));
+                        let npos = conds.len();
+                        let (cs_off,cs) = cs_view.get_el_ext(self.prog);
+                        let cs_inp = Transformation::view(cs_off,
+                                                          cs.num_elem(),
+                                                          self.inp_prog.clone());
+                        let it = cs.access_top(cs_inp,self.exprs,em)?;
+                        Ok(Some((cs_view,cs_off,cs,it,npos)))
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<'a,It,V,Em : DeriveValues> CondIterator<Em> for CurrentCallFrameIter<'a,It,V,Em>
+    where It : CondIterator<Em,Item=ThreadView<'a,V>>,
+          V : 'a+Bytes+FromConst<'a> {
+    type Item = Then<Then<ThreadView<'a,V>,
+                          Then<CallStackView<'a,V>,
+                               AssocView<CallId<'a>,
+                                         BitVecVectorStack<(CallFrame<'a,V>,Frame<'a,V>)>>>>,
+                     BitVecVectorStackView<(CallFrame<'a,V>,Frame<'a,V>)>>;
+    fn next(&mut self,conds: &mut Vec<Transf<Em>>,pos: usize,em: &mut Em)
+            -> Result<Option<Self::Item>,Em::Error> {
+        while let Some((cs_view,cs_off,cs,mut it,npos)) = self.take_cur_iter(conds,pos,em)? {
+            match it.next(conds,npos,em)? {
+                None => continue,
+                Some(el) => {
+                    self.cur_iter = Some((cs_view.clone(),cs_off,cs,it,npos));
+                    let r_view = Then::new(cs_view,el);
+                    return Ok(Some(r_view))
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+pub enum PointerView<'a,V : 'a> {
+    Global(Then<GlobalsView<'a,V>,
+                AssocView<&'a String,MemSlice<'a,V>>>),
+    Heap(Then<HeapView<'a,V>,
+              Then<AssocView<InstructionRef<'a>,
+                             Vec<MemSlice<'a,V>>>,
+                   VecView<MemSlice<'a,V>>>>),
+    Stack(Then<ThreadsView<'a,V>,
+               Then<AssocView<ThreadId<'a>,
+                              Vec<Thread<'a,V>>>,
+                    Then<VecView<Thread<'a,V>>,
+                         Then<FrameView<'a,V>,
+                              Then<AllocationsView<'a,V>,
+                                   Then<AssocView<InstructionRef<'a>,
+                                                  Vec<MemSlice<'a,V>>>,
+                                        VecView<MemSlice<'a,V>>>>>>>>)
+}
+
+impl<'a,V> View for PointerView<'a,V>
+    where V : 'a+Bytes+FromConst<'a> {
+    type Viewed = Program<'a,V>;
+    type Element = MemSlice<'a,V>;
+    fn get_el<'b>(&self,obj: &'b Self::Viewed)
+                  -> &'b Self::Element where Self : 'b {
+        match self {
+            &PointerView::Global(ref view)
+                => view.get_el(obj),
+            &PointerView::Heap(ref view)
+                => view.get_el(obj),
+            &PointerView::Stack(ref view)
+                => view.get_el(obj)
+        }
+    }
+    fn get_el_ext<'b>(&self,obj: &'b Self::Viewed)
+                      -> (usize,&'b Self::Element) where Self : 'b {
+        match self {
+            &PointerView::Global(ref view)
+                => view.get_el_ext(obj),
+            &PointerView::Heap(ref view)
+                => view.get_el_ext(obj),
+            &PointerView::Stack(ref view)
+                => view.get_el_ext(obj)
+        }
     }
 }

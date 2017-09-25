@@ -6,21 +6,28 @@ use super::mem::{Bytes,FromConst,MemSlice};
 use super::{InstructionRef};
 use super::thread::CallId;
 use std::fmt::Debug;
+use std::marker::PhantomData;
 
 #[derive(PartialEq,Eq,PartialOrd,Ord,Hash,Clone,Debug)]
-pub enum FrameId<'a> {
+pub enum ContextId<'a> {
     Call(CallId<'a>),
     Stack(CallId<'a>,InstructionRef<'a>)
 }
 
-pub type PrevFrame<'a> = Choice<Option<Data<FrameId<'a>>>>;
+#[derive(PartialEq,Eq,PartialOrd,Ord,Hash,Clone,Debug)]
+pub enum FrameId<'a> {
+    Call(CallId<'a>),
+    Stack(InstructionRef<'a>)
+}
+
+pub type PrevFrame<'a> = Choice<Option<Data<ContextId<'a>>>>;
 
 pub type Allocations<'a,V> = Assoc<InstructionRef<'a>,Vec<MemSlice<'a,V>>>;
 
 pub type Activation<'a> = Choice<Data<InstructionRef<'a>>>;
 
 #[derive(PartialEq,Eq,Hash,Clone,Debug)]
-pub struct Frame<'a,V : Bytes + Clone> {
+pub struct Frame<'a,V> {
     previous: PrevFrame<'a>,
     allocations: Allocations<'a,V>
 }
@@ -262,5 +269,251 @@ impl<'b,V : Composite+FromConst<'b>+Clone> Composite for CallFrame<'b,V> {
                                            activation: nact.as_obj(),
                                            phi: nphi.as_obj() }),
                  Transformation::concat(&[nvalues_inp,nargs_inp,nact_inp,nphi_inp]))))
+    }
+}
+
+#[derive(Clone,PartialEq,Eq)]
+pub struct PrevFrameView<'a,V : 'a>(PhantomData<&'a V>);
+
+#[derive(Clone,PartialEq,Eq)]
+pub struct AllocationsView<'a,V : 'a>(PhantomData<&'a V>);
+
+#[derive(PartialEq,Eq)]
+pub struct ValuesView<'a,V : 'a>(PhantomData<&'a V>);
+
+#[derive(PartialEq,Eq)]
+pub struct ArgumentsView<'a,V : 'a>(PhantomData<&'a V>);
+
+#[derive(PartialEq,Eq)]
+pub struct ActivationView<'a,V : 'a>(PhantomData<&'a V>);
+
+#[derive(PartialEq,Eq)]
+pub struct PhiView<'a,V : 'a>(PhantomData<&'a V>);
+
+impl<'a,V> PrevFrameView<'a,V> {
+    pub fn new() -> Self {
+        PrevFrameView(PhantomData)
+    }
+}
+
+impl<'a,V> AllocationsView<'a,V> {
+    pub fn new() -> Self {
+        AllocationsView(PhantomData)
+    }
+}
+
+impl<'a,V> ValuesView<'a,V> {
+    pub fn new() -> Self {
+        ValuesView(PhantomData)
+    }
+}
+
+impl<'a,V> ArgumentsView<'a,V> {
+    pub fn new() -> Self {
+        ArgumentsView(PhantomData)
+    }
+}
+
+impl<'a,V> ActivationView<'a,V> {
+    pub fn new() -> Self {
+        ActivationView(PhantomData)
+    }
+}
+
+impl<'a,V> PhiView<'a,V> {
+    pub fn new() -> Self {
+        PhiView(PhantomData)
+    }
+}
+
+impl<'a,V> Clone for ValuesView<'a,V> {
+    fn clone(&self) -> Self {
+        ValuesView(PhantomData)
+    }
+}
+
+impl<'a,V> Clone for ArgumentsView<'a,V> {
+    fn clone(&self) -> Self {
+        ArgumentsView(PhantomData)
+    }
+}
+
+impl<'a,V> Clone for ActivationView<'a,V> {
+    fn clone(&self) -> Self {
+        ActivationView(PhantomData)
+    }
+}
+
+impl<'a,V> Clone for PhiView<'a,V> {
+    fn clone(&self) -> Self {
+        PhiView(PhantomData)
+    }
+}
+
+impl<'a,V> View for PrevFrameView<'a,V>
+    where V : 'a + Bytes+FromConst<'a> {
+    type Viewed = Frame<'a,V>;
+    type Element = PrevFrame<'a>;
+    fn get_el<'b>(&self,obj: &'b Self::Viewed)
+                  -> &'b Self::Element where Self : 'b {
+        &obj.previous
+    }
+    fn get_el_ext<'b>(&self,obj: &'b Self::Viewed)
+                      -> (usize,&'b Self::Element) where Self : 'b {
+        (0,&obj.previous)
+    }
+}
+
+impl<'a,V> ViewMut for PrevFrameView<'a,V>
+    where V : 'a + Bytes+FromConst<'a> {
+    fn get_el_mut<'b>(&self,obj: &'b mut Self::Viewed)
+                      -> &'b mut Self::Element where Self : 'b {
+        &mut obj.previous
+    }
+    fn get_el_mut_ext<'b>(&self,obj: &'b mut Self::Viewed)
+                          -> (usize,&'b mut Self::Element)
+        where Self : 'b {
+        (0,&mut obj.previous)
+    }
+}
+
+impl<'a,V> View for AllocationsView<'a,V>
+    where V : 'a + Bytes+FromConst<'a> {
+    type Viewed = Frame<'a,V>;
+    type Element = Allocations<'a,V>;
+    fn get_el<'b>(&self,obj: &'b Self::Viewed)
+                  -> &'b Self::Element where Self : 'b {
+        &obj.allocations
+    }
+    fn get_el_ext<'b>(&self,obj: &'b Self::Viewed)
+                      -> (usize,&'b Self::Element) where Self : 'b {
+        (obj.previous.num_elem(),&obj.allocations)
+    }
+}
+
+impl<'a,V> ViewMut for AllocationsView<'a,V>
+    where V : 'a + Bytes+FromConst<'a> {
+    fn get_el_mut<'b>(&self,obj: &'b mut Self::Viewed)
+                      -> &'b mut Self::Element where Self : 'b {
+        &mut obj.allocations
+    }
+    fn get_el_mut_ext<'b>(&self,obj: &'b mut Self::Viewed)
+                          -> (usize,&'b mut Self::Element)
+        where Self : 'b {
+        (obj.previous.num_elem(),&mut obj.allocations)
+    }
+}
+
+impl<'a,V> View for ValuesView<'a,V>
+    where V : 'a + Bytes+FromConst<'a> {
+    type Viewed = CallFrame<'a,V>;
+    type Element = Assoc<&'a String,V>;
+    fn get_el<'b>(&self,obj: &'b Self::Viewed)
+                  -> &'b Self::Element where Self : 'b {
+        &obj.values
+    }
+    fn get_el_ext<'b>(&self,obj: &'b Self::Viewed)
+                      -> (usize,&'b Self::Element) where Self : 'b {
+        (0,&obj.values)
+    }
+}
+
+impl<'a,V> ViewMut for ValuesView<'a,V>
+    where V : 'a + Bytes+FromConst<'a> {
+    fn get_el_mut<'b>(&self,obj: &'b mut Self::Viewed)
+                      -> &'b mut Self::Element where Self : 'b {
+        &mut obj.values
+    }
+    fn get_el_mut_ext<'b>(&self,obj: &'b mut Self::Viewed)
+                          -> (usize,&'b mut Self::Element)
+        where Self : 'b {
+        (0,&mut obj.values)
+    }
+}
+
+impl<'a,V> View for ArgumentsView<'a,V>
+    where V : 'a + Bytes+FromConst<'a> {
+    type Viewed = CallFrame<'a,V>;
+    type Element = Vec<V>;
+    fn get_el<'b>(&self,obj: &'b Self::Viewed)
+                  -> &'b Self::Element where Self : 'b {
+        &obj.arguments
+    }
+    fn get_el_ext<'b>(&self,obj: &'b Self::Viewed)
+                      -> (usize,&'b Self::Element) where Self : 'b {
+        (obj.values.num_elem(),&obj.arguments)
+    }
+}
+
+impl<'a,V> ViewMut for ArgumentsView<'a,V>
+    where V : 'a + Bytes+FromConst<'a> {
+    fn get_el_mut<'b>(&self,obj: &'b mut Self::Viewed)
+                      -> &'b mut Self::Element where Self : 'b {
+        &mut obj.arguments
+    }
+    fn get_el_mut_ext<'b>(&self,obj: &'b mut Self::Viewed)
+                          -> (usize,&'b mut Self::Element)
+        where Self : 'b {
+        (obj.values.num_elem(),&mut obj.arguments)
+    }
+}
+
+impl<'a,V> View for ActivationView<'a,V>
+    where V : 'a + Bytes+FromConst<'a> {
+    type Viewed = CallFrame<'a,V>;
+    type Element = Activation<'a>;
+    fn get_el<'b>(&self,obj: &'b Self::Viewed)
+                  -> &'b Self::Element where Self : 'b {
+        &obj.activation
+    }
+    fn get_el_ext<'b>(&self,obj: &'b Self::Viewed)
+                      -> (usize,&'b Self::Element) where Self : 'b {
+        (obj.values.num_elem()+
+         obj.arguments.num_elem(),&obj.activation)
+    }
+}
+
+impl<'a,V> ViewMut for ActivationView<'a,V>
+    where V : 'a + Bytes+FromConst<'a> {
+    fn get_el_mut<'b>(&self,obj: &'b mut Self::Viewed)
+                      -> &'b mut Self::Element where Self : 'b {
+        &mut obj.activation
+    }
+    fn get_el_mut_ext<'b>(&self,obj: &'b mut Self::Viewed)
+                          -> (usize,&'b mut Self::Element)
+        where Self : 'b {
+        (obj.values.num_elem()+
+         obj.arguments.num_elem(),&mut obj.activation)
+    }
+}
+
+impl<'a,V> View for PhiView<'a,V>
+    where V : 'a + Bytes+FromConst<'a> {
+    type Viewed = CallFrame<'a,V>;
+    type Element = Choice<Data<&'a String>>;
+    fn get_el<'b>(&self,obj: &'b Self::Viewed)
+                  -> &'b Self::Element where Self : 'b {
+        &obj.phi
+    }
+    fn get_el_ext<'b>(&self,obj: &'b Self::Viewed)
+                      -> (usize,&'b Self::Element) where Self : 'b {
+        (obj.values.num_elem()+
+         obj.arguments.num_elem()+
+         obj.activation.num_elem(),&obj.phi)
+    }
+}
+
+impl<'a,V> ViewMut for PhiView<'a,V>
+    where V : 'a + Bytes+FromConst<'a> {
+    fn get_el_mut<'b>(&self,obj: &'b mut Self::Viewed)
+                      -> &'b mut Self::Element where Self : 'b {
+        &mut obj.phi
+    }
+    fn get_el_mut_ext<'b>(&self,obj: &'b mut Self::Viewed)
+                          -> (usize,&'b mut Self::Element)
+        where Self : 'b {
+        (obj.values.num_elem()+
+         obj.arguments.num_elem()+
+         obj.activation.num_elem(),&mut obj.phi)
     }
 }

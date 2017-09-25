@@ -1,22 +1,35 @@
 extern crate smtrs;
 extern crate llvm_ir;
 
-use self::smtrs::composite::{Composite,OptRef,Transformation,Transf};
+use self::smtrs::composite::{Composite,OptRef,Transformation,Transf,
+                             vec_iter,index_as_value,ite};
 use self::smtrs::embed::{Embed};
+use self::smtrs::expr;
 use std::cmp::{Ordering,max};
 use self::llvm_ir::datalayout::DataLayout;
 use self::llvm_ir::types::{Type as LLVMType};
 use std::collections::HashMap;
 use std::hash::{Hash,Hasher};
+use super::pointer::Offset;
 
 pub trait Bytes : Composite {
     fn byte_width(&self) -> usize;
     fn extract_bytes<'a,Em : Embed>(OptRef<'a,Self>,Transf<Em>,usize,usize,&mut Em)
-                                    -> Result<Option<(OptRef<'a,Self>,Transf<Em>)>,Em::Error>;
+                                    -> Result<Option<(OptRef<'a,Self>,Transf<Em>)>,Em::Error> {
+        Ok(None)
+    }
+    fn concat_bytes<'a,Em : Embed>(OptRef<'a,Self>,
+                                   Transf<Em>,
+                                   OptRef<'a,Self>,
+                                   Transf<Em>,
+                                   &mut Em)
+                                   -> Result<Option<(OptRef<'a,Self>,Transf<Em>)>,Em::Error> {
+        Ok(None)
+    }
 }
 
 #[derive(PartialEq,Eq,Clone,Debug)]
-pub enum MemObj<'a,V : Composite> {
+pub enum MemObj<'a,V> {
     FreshObj(usize),
     ConstObj(&'a DataLayout,
              &'a llvm_ir::Constant,
@@ -26,7 +39,7 @@ pub enum MemObj<'a,V : Composite> {
 }
 
 #[derive(PartialEq,Eq,Hash,Clone,Debug)]
-pub struct MemSlice<'a,V : Composite>(pub Vec<MemObj<'a,V>>);
+pub struct MemSlice<'a,V>(pub Vec<MemObj<'a,V>>);
 
 pub trait FromConst<'a> : Composite {
     fn from_const<Em : Embed>(&'a DataLayout,
@@ -37,13 +50,141 @@ pub trait FromConst<'a> : Composite {
                               -> Result<Option<(Self,Transf<Em>)>,Em::Error>;
 }
 
-impl<'a,V : Composite> MemSlice<'a,V> {
+impl<'a,V : Bytes+FromConst<'a>+Clone> MemSlice<'a,V> {
     pub fn alloca<Em : Embed>(sz: usize,_: &mut Em) -> (Self,Transf<Em>) {
         (MemSlice(vec![MemObj::FreshObj(sz)]),
          Transformation::id(0))
     }
     pub fn is_free(&self) -> bool {
         false
+    }
+    pub fn byte_width(&self) -> usize {
+        let mut bw = 0;
+        for obj in self.0.iter() {
+            bw+=obj.byte_width()
+        }
+        bw
+    }
+    pub fn read_static<'b,Em>(sl: OptRef<'b,Self>,
+                              inp_sl: Transf<Em>,
+                              off: usize,
+                              len: usize,
+                              em: &mut Em)
+                              -> Result<Option<(OptRef<'b,V>,Transf<Em>)>,Em::Error>
+        where Em : Embed {
+        let mut acc = 0;
+        let vec = match sl {
+            OptRef::Ref(ref rsl) => OptRef::Ref(&rsl.0),
+            OptRef::Owned(rsl) => OptRef::Owned(rsl.0)
+        };
+        let mut it = vec_iter(vec,inp_sl);
+        while let Some((obj,obj_inp)) = it.next() {
+            let bw = obj.as_ref().byte_width();
+            let sz = obj.as_ref().num_elem();
+            if off<acc+bw {
+                if off==acc && bw==len {
+                    return MemObj::as_value(obj,obj_inp,em)
+                }
+                if off-acc+len<=bw {
+                    return match MemObj::as_value(obj,obj_inp,em)? {
+                        None => Ok(None),
+                        Some((sobj,sobj_inp))
+                            => V::extract_bytes(sobj,sobj_inp,off-acc,len,em)
+                    }
+                }
+                let (start,inp_start) = {
+                    match MemObj::as_value(obj,obj_inp,em)? {
+                        None => return Ok(None),
+                        Some((val0,val0_inp)) => if off==acc {
+                            (val0,val0_inp)
+                        } else {
+                            match V::extract_bytes(val0,val0_inp,off-acc,bw+acc-off,em)? {
+                                None => return Ok(None),
+                                Some(res) => res
+                            }
+                        }
+                    }
+                };
+                acc+=bw;
+                let mut rest = len+acc-off;
+                let mut cur = start;
+                let mut cur_inp = inp_start;
+                while let Some((obj,obj_inp)) = it.next() {
+                    let bw = obj.as_ref().byte_width();
+                    let sz = obj.as_ref().num_elem();
+                    let (val,val_inp) = match MemObj::as_value(obj,obj_inp,em)? {
+                        None => return Ok(None),
+                        Some(res) => res
+                    };
+                    if rest<bw {
+                        let (rval,rval_inp) = match V::extract_bytes(val,val_inp,0,rest,em)? {
+                            None => return Ok(None),
+                            Some(res) => res
+                        };
+                        return V::concat_bytes(cur,cur_inp,rval,rval_inp,em)
+                    }
+                    let (ncur,ncur_inp) = match V::concat_bytes(cur,cur_inp,val,val_inp,em)? {
+                        None => return Ok(None),
+                        Some(res) => res
+                    };
+                    cur = ncur;
+                    cur_inp = ncur_inp;
+                    acc+=bw;
+                }
+                return Ok(None)
+            }
+            acc+=bw;
+        }
+        Ok(None)
+    }
+    pub fn read<'b,Em : Embed>(sl: OptRef<'b,Self>,
+                               inp_sl: Transf<Em>,
+                               off: OptRef<'b,Offset>,
+                               inp_off: Transf<Em>,
+                               len: usize,
+                               em: &mut Em)
+                               -> Result<Option<(OptRef<'b,V>,Transf<Em>)>,Em::Error> {
+        let (stat_off,mult) = (off.as_ref().0).0;
+        match off.as_ref().1 {
+            None => Self::read_static(sl,inp_sl,stat_off,len,em),
+            Some(ref singleton) => {
+                let srt = singleton.0.kind();
+                let (val0,inp_val0) = match Self::read_static(sl.to_ref(),inp_sl.clone(),stat_off,len,em)? {
+                    None => return Ok(None),
+                    Some(r) => r
+                };
+                let sz = sl.as_ref().byte_width();
+                let mut cval = val0;
+                let mut inp_cval = inp_val0;
+                for i in 0..(sz-stat_off-len)/mult {
+                    let idx = index_as_value(&srt,i);
+                    let (rval,inp_rval) = match Self::read_static(sl.to_ref(),inp_sl.clone(),stat_off+i*mult,len,em)? {
+                        None => return Ok(None),
+                        Some(r) => r
+                    };
+                    let cond_fun = move |_:&[Em::Expr],_:usize,e: Em::Expr,em: &mut Em| {
+                        let c = em.embed(expr::Expr::Const(idx.clone()))?;
+                        em.eq(e,c)
+                    };
+                    let cond = Transformation::map_by_elem(Box::new(cond_fun),inp_off.clone());
+                    let (nval,inp_nval) = match ite(cval,rval,cond,inp_cval,inp_rval,em)? {
+                        None => return Ok(None),
+                        Some(r) => r
+                    };
+                    cval = nval;
+                    inp_cval = inp_nval;
+                }
+                Ok(Some((OptRef::Owned(cval.as_obj()),inp_cval)))
+            }
+        }
+    }
+    fn index<'b>(sl: OptRef<'b,Self>,
+                 idx: usize)
+                 -> OptRef<'b,MemObj<'a,V>> {
+        match sl {
+            OptRef::Ref(ref rsl) => OptRef::Ref(&rsl.0[idx]),
+            OptRef::Owned(mut rsl) => OptRef::Owned(rsl.0.swap_remove(idx))
+        }
     }
 }
 
@@ -53,6 +194,24 @@ impl<'a,V : Bytes+FromConst<'a>> MemObj<'a,V> {
             &MemObj::FreshObj(_) => 0,
             &MemObj::ConstObj(_,_,_,_) => 0,
             &MemObj::ValueObj(ref v) => v.num_elem()
+        }
+    }
+    pub fn byte_width(&self) -> usize {
+        match self {
+            &MemObj::FreshObj(w) => if w%8==0 {
+                w/8
+            } else {
+                w/8+1
+            },
+            &MemObj::ConstObj(ref dl,_,ref tp,ref tps) => {
+                let w = dl.type_size_in_bits(tp,tps);
+                if w%8==0 {
+                    (w/8) as usize
+                } else {
+                    (w/8+1) as usize
+                }
+            },
+            &MemObj::ValueObj(ref v) => v.byte_width()
         }
     }
     pub fn as_value<'b,Em : Embed>(obj: OptRef<'b,Self>,
@@ -439,7 +598,7 @@ impl<'a,V : Bytes+FromConst<'a>+Clone> Composite for MemSlice<'a,V> {
     }
 }
 
-impl<'a,V : Composite> Hash for MemObj<'a,V> {
+impl<'a,V : Hash> Hash for MemObj<'a,V> {
     fn hash<H>(&self, state: &mut H)
         where H: Hasher {
         match self {
@@ -457,5 +616,37 @@ impl<'a,V : Composite> Hash for MemObj<'a,V> {
                 v.hash(state);
             }
         }
+    }
+}
+
+impl<'a,V : Composite> Composite for MemObj<'a,V> {
+    fn num_elem(&self) -> usize {
+        match self {
+            &MemObj::ValueObj(ref v) => v.num_elem(),
+            _ => 0
+        }
+    }
+    fn elem_sort<Em : Embed>(&self,pos: usize,em: &mut Em) -> Result<Em::Sort,Em::Error> {
+        match self {
+            &MemObj::ValueObj(ref v) => v.elem_sort(pos,em),
+            _ => panic!("elem_sort called on empty MemObj")
+        }
+    }
+    fn combine<'b, Em, FComb, FL, FR>(
+        _: OptRef<'b, Self>, 
+        _: OptRef<'b, Self>, 
+        _: Transf<Em>, 
+        _: Transf<Em>, 
+        _: &FComb, 
+        _: &FL, 
+        _: &FR, 
+        _: &mut Em
+    ) -> Result<Option<(OptRef<'b, Self>, Transf<Em>)>, Em::Error>
+        where
+        Em: Embed,
+        FComb: Fn(Transf<Em>, Transf<Em>, &mut Em) -> Result<Transf<Em>, Em::Error>,
+        FL: Fn(Transf<Em>, &mut Em) -> Result<Transf<Em>, Em::Error>,
+        FR: Fn(Transf<Em>, &mut Em) -> Result<Transf<Em>, Em::Error> {
+        Ok(None)
     }
 }

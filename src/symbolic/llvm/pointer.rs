@@ -21,7 +21,7 @@ pub fn base_pointer_global<'a,'b,Em>(name: &'a String,em: &mut Em)
                                                 Transf<Em>),Em::Error>
     where Em : Embed {
     let (ch0,inp_ch0) = choice_empty();
-    let (ch,inp_ch) = choice_insert(ch0,inp_ch0,Transformation::const_bool(true,em)?,
+    let (ch,inp_ch) = choice_insert(OptRef::Owned(ch0),inp_ch0,Transformation::const_bool(true,em)?,
                                     OptRef::Owned((PointerTrg::Global(name),
                                                    (Data((0,0)),None))),
                                     Transformation::id(0))?;
