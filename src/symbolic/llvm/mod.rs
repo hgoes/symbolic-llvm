@@ -285,7 +285,7 @@ pub fn translate_instr<'b,V,Em
                 let (nacts,nacts_inp) = choice_set_chosen(OptRef::Ref(acts),acts_inp,rcond,
                                                           OptRef::Owned(Data(instr_id.next())),
                                                           Transformation::id(0))?;
-                act_view.write(nacts.as_obj(),nacts_inp,prog,&mut nprog,&mut updates);
+                act_view.write(nacts.as_obj(),nacts_inp,&mut nprog,&mut updates);
             }
             let nprog_inp = finish_updates(updates,prog_inp);
             Ok((nprog,nprog_inp))
