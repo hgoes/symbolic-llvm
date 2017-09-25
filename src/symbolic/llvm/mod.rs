@@ -172,16 +172,15 @@ fn filter_ctx_id<'a,V>(cf_id: &CallId<'a>,el: (ThreadView<'a,V>,&Data<Option<Con
     }
 }
 
-pub fn translate_instr<'a,'b : 'a,V,Em
+pub fn translate_instr<'b,V,Em
                        >(dl: &'b DataLayout,
                          tps: &'b HashMap<String,Type>,
                          thread_id: ThreadId<'b>,
                          cf_id: CallId<'b>,
                          instr_id: InstructionRef<'b>,
                          instr: &'b llvm_ir::Instruction,
-                         next_instr_id: &InstructionRef<'b>,
-                         prog: &'b Program<'b,V>,
-                         inp: &'b ProgramInput<'b,V>,
+                         prog: &Program<'b,V>,
+                         inp: &ProgramInput<'b,V>,
                          prog_inp: Transf<Em>,
                          inp_inp: Transf<Em>,
                          exprs: &[Em::Expr],
@@ -189,7 +188,7 @@ pub fn translate_instr<'a,'b : 'a,V,Em
                          -> Result<(Program<'b,V>,
                                     Transf<Em>),
                                    TrErr<'b,V,Em::Error>>
-    where V : Bytes+FromConst<'b>+IntValue+Vector+Pointer<'b>,Em : DeriveValues {
+    where V : 'b+Bytes+FromConst<'b>+IntValue+Vector+Pointer<'b>,Em : DeriveValues {
     let (step,thr_idx) = match program_input_thread_activation(inp,inp_inp,&thread_id,em)? {
         Some(r) => r,
         None => {
@@ -294,16 +293,16 @@ pub fn translate_instr<'a,'b : 'a,V,Em
     }
 }
 
-pub fn translate_value<'a,'b,V,Em>(dl: &'b DataLayout,
-                                   value: &'b llvm_ir::Value,
-                                   tp: &Type,
-                                   tps: &'b HashMap<String,Type>,
-                                   cf: &'b CallFrame<'b,V>,
-                                   cf_inp: Transf<Em>,
-                                   exprs: &[Em::Expr],
-                                   em: &mut Em)
-                                   -> Result<(V,Transf<Em>),Em::Error>
-    where V : Bytes+FromConst<'b>+Pointer<'b>+IntValue+Vector+Clone,Em : DeriveValues {
+pub fn translate_value<'b,V,Em>(dl: &'b DataLayout,
+                                value: &'b llvm_ir::Value,
+                                tp: &'b Type,
+                                tps: &'b HashMap<String,Type>,
+                                cf: &CallFrame<'b,V>,
+                                cf_inp: Transf<Em>,
+                                exprs: &[Em::Expr],
+                                em: &mut Em)
+                                -> Result<(V,Transf<Em>),Em::Error>
+    where V : 'b+Bytes+FromConst<'b>+Pointer<'b>+IntValue+Vector+Clone,Em : DeriveValues {
     match value {
         &llvm_ir::Value::Constant(ref c) => {
             let (obj,els) = translate_constant(dl,c,tp,tps,em)?;

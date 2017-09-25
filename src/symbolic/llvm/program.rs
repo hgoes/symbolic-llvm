@@ -514,7 +514,7 @@ pub struct CurrentThreadIter<'a,V,Em : DeriveValues> {
 
 impl<'a,Em : DeriveValues,V : 'a+Bytes+FromConst<'a>+Clone
      > CurrentThreadIter<'a,V,Em> {
-    pub fn new(prog: &'a Program<'a,V>,
+    pub fn new(prog: &Program<'a,V>,
                thr_id: ThreadId<'a>,
                step: Transf<Em>,
                thr_idx: Transf<Em>,
@@ -568,21 +568,21 @@ impl<'a,Em : DeriveValues,V : 'a> CondIterator<Em> for CurrentThreadIter<'a,V,Em
     }
 }
 
-type TopFrameIdIter<'a,It,V,Em>
-    = SeqPure<It,Context<GetterElement<'a,Choice<Data<Option<ContextId<'a>>>>,
-                                       Chosen<'a,Data<Option<ContextId<'a>>>,Em>>,ThreadView<'a,V>>,
-              (&'a Program<'a,V>,
+type TopFrameIdIter<'a,'b,It,V,Em>
+    = SeqPure<It,Context<GetterElement<'b,Choice<Data<Option<ContextId<'a>>>>,
+                                       Chosen<'b,Data<Option<ContextId<'a>>>,Em>>,ThreadView<'a,V>>,
+              (&'b Program<'a,V>,
                Transf<Em>),
-              fn(&(&'a Program<'a,V>,
+              fn(&(&'b Program<'a,V>,
                    Transf<Em>),
-                 ThreadView<'a,V>) -> Context<GetterElement<'a,Choice<Data<Option<ContextId<'a>>>>,
-                                                            Chosen<'a,Data<Option<ContextId<'a>>>,Em>>,ThreadView<'a,V>>>;
+                 ThreadView<'a,V>) -> Context<GetterElement<'b,Choice<Data<Option<ContextId<'a>>>>,
+                                                            Chosen<'b,Data<Option<ContextId<'a>>>,Em>>,ThreadView<'a,V>>>;
 
-pub fn get_frame_id_iter<'a,V,Em>(ctx: &(&'a Program<'a,V>,
-                                         Transf<Em>),
-                                  thr_view: ThreadView<'a,V>)
-                                  -> Context<GetterElement<'a,Choice<Data<Option<ContextId<'a>>>>,
-                                                           Chosen<'a,Data<Option<ContextId<'a>>>,Em>>,ThreadView<'a,V>>
+pub fn get_frame_id_iter<'a,'b,V,Em>(ctx: &(&'b Program<'a,V>,
+                                            Transf<Em>),
+                                     thr_view: ThreadView<'a,V>)
+                                     -> Context<GetterElement<'b,Choice<Data<Option<ContextId<'a>>>>,
+                                                              Chosen<'b,Data<Option<ContextId<'a>>>,Em>>,ThreadView<'a,V>>
     where Em : Embed, V : Bytes+FromConst<'a> {
     
     let (top_off,top) = thr_view.clone().then(StackTopView::new()).get_el_ext(ctx.0);
@@ -591,9 +591,9 @@ pub fn get_frame_id_iter<'a,V,Em>(ctx: &(&'a Program<'a,V>,
 }
 
 
-pub fn top_frame_id_iter<'a,V,It,Em>(prog: &'a Program<'a,V>,
-                                     prog_inp: Transf<Em>,
-                                     prev: It) -> TopFrameIdIter<'a,It,V,Em>
+pub fn top_frame_id_iter<'a,'b,V,It,Em>(prog: &'b Program<'a,V>,
+                                        prog_inp: Transf<Em>,
+                                        prev: It) -> TopFrameIdIter<'a,'b,It,V,Em>
     where Em : Embed, It : CondIterator<Em,Item=ThreadView<'a,V>>, V : Bytes+FromConst<'a> {
     prev.seq_pure((prog,prog_inp),get_frame_id_iter)
 }
