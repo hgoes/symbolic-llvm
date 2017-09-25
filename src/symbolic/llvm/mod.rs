@@ -214,6 +214,7 @@ pub fn translate_instr<'b,V,Em
             let mut nprog = prog.clone();
             let mut updates = Vec::new();
             while let Some((cond,(cf_view,fr_view))) = ctxs.next(em)? {
+                println!("CONTEXT");
                 let (cf,cf_inp) = cf_view.get_with_inp(prog,prog_inp.clone());
                 let dyn = match sz {
                     &None => None,
