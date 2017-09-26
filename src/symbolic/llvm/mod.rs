@@ -189,6 +189,8 @@ pub fn translate_instr<'b,V,Em
                                     Transf<Em>),
                                    TrErr<'b,V,Em::Error>>
     where V : 'b+Bytes+FromConst<'b>+IntValue+Vector+Pointer<'b>,Em : DeriveValues {
+    debug_assert_eq!(prog.num_elem(),prog_inp.size());
+    debug_assert_eq!(inp.num_elem(),inp_inp.size());
     let (step,thr_idx) = match program_input_thread_activation(inp,inp_inp,&thread_id,em)? {
         Some(r) => r,
         None => {
