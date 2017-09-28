@@ -5,8 +5,8 @@ use self::smtrs::embed::{Embed};
 use super::mem::{Bytes,FromConst,MemSlice};
 use super::{InstructionRef};
 use super::thread::CallId;
-use std::fmt::Debug;
 use std::marker::PhantomData;
+use std::ops::Range;
 
 #[derive(PartialEq,Eq,PartialOrd,Ord,Hash,Clone,Debug)]
 pub enum ContextId<'a> {
@@ -38,6 +38,75 @@ pub struct CallFrame<'a,V> {
     arguments: Vec<V>,
     activation: Activation<'a>,
     phi: Choice<Data<&'a String>>
+}
+
+enum CallFrameDataVarsPos {
+    Values,Arguments,Phi
+}
+
+pub struct CallFrameDataVars<'a,'b : 'a,V : 'b> {
+    off: usize,
+    call_frame: &'a CallFrame<'b,V>,
+    pos: CallFrameDataVarsPos,
+    iter: Range<usize>
+}
+
+impl<'a,'b,V : Composite> Iterator for CallFrameDataVars<'a,'b,V> {
+    type Item = usize;
+    fn next(&mut self) -> Option<usize> {
+        loop {
+            match self.iter.next() {
+                Some(r) => return Some(r),
+                None => match self.pos {
+                    CallFrameDataVarsPos::Values => {
+                        self.pos = CallFrameDataVarsPos::Arguments;
+                        let args_sz = self.call_frame.arguments.num_elem();
+                        let acts_sz = self.call_frame.activation.num_elem();
+                        self.iter = self.off..self.off+args_sz;
+                        self.off+=args_sz+acts_sz;
+                    },
+                    CallFrameDataVarsPos::Arguments => {
+                        self.pos = CallFrameDataVarsPos::Phi;
+                        let phi_sz = self.call_frame.arguments.num_elem();
+                        self.iter = self.off..self.off+phi_sz;
+                        self.off+=phi_sz;
+                    },
+                    CallFrameDataVarsPos::Phi => return None
+                }
+            }
+        }
+    }
+}
+
+impl<'a,V : Composite> CallFrame<'a,V> {
+    pub fn pc_vars(&self,off: usize) -> Range<usize> {
+        let off_acts = off+self.values.num_elem()+
+            self.arguments.num_elem();
+        let sz_acts = self.activation.num_elem();
+        off_acts..off_acts+sz_acts
+    }
+    pub fn data_vars<'b>(&'b self,off: usize) -> (usize,CallFrameDataVars<'b,'a,V>) {
+        let vals_sz = self.values.num_elem();
+        let args_sz = self.arguments.num_elem();
+        let acts_sz = self.activation.num_elem();
+        let phi_sz = self.activation.num_elem();
+        (vals_sz+args_sz+acts_sz+phi_sz,
+         CallFrameDataVars { off: off+vals_sz,
+                             call_frame: self,
+                             pos: CallFrameDataVarsPos::Values,
+                             iter: off..off+vals_sz })
+    }
+}
+
+impl<'a,V : Bytes+FromConst<'a>> Frame<'a,V> {
+    pub fn pc_vars(&self,off: usize) -> Range<usize> {
+        off..off+self.previous.num_elem()
+    }
+    pub fn data_vars(&self,off: usize) -> (usize,Range<usize>) {
+        let prev_sz = self.previous.num_elem();
+        let alloc_sz = self.allocations.num_elem();
+        (prev_sz+alloc_sz,off+prev_sz..off+prev_sz+alloc_sz)
+    }
 }
 
 pub fn frame<'a,'b,'c,V,Em>(prev: OptRef<'a,PrevFrame<'b>>,
@@ -272,22 +341,22 @@ impl<'b,V : Composite+FromConst<'b>+Clone> Composite for CallFrame<'b,V> {
     }
 }
 
-#[derive(Clone,PartialEq,Eq)]
+#[derive(Clone,PartialEq,Eq,Debug)]
 pub struct PrevFrameView<'a,V : 'a>(PhantomData<&'a V>);
 
-#[derive(Clone,PartialEq,Eq)]
+#[derive(Clone,PartialEq,Eq,Debug)]
 pub struct AllocationsView<'a,V : 'a>(PhantomData<&'a V>);
 
-#[derive(PartialEq,Eq)]
+#[derive(PartialEq,Eq,Debug)]
 pub struct ValuesView<'a,V : 'a>(PhantomData<&'a V>);
 
-#[derive(PartialEq,Eq)]
+#[derive(PartialEq,Eq,Debug)]
 pub struct ArgumentsView<'a,V : 'a>(PhantomData<&'a V>);
 
-#[derive(PartialEq,Eq)]
+#[derive(PartialEq,Eq,Debug)]
 pub struct ActivationView<'a,V : 'a>(PhantomData<&'a V>);
 
-#[derive(PartialEq,Eq)]
+#[derive(PartialEq,Eq,Debug)]
 pub struct PhiView<'a,V : 'a>(PhantomData<&'a V>);
 
 impl<'a,V> PrevFrameView<'a,V> {

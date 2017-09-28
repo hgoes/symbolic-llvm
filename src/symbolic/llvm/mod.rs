@@ -12,8 +12,7 @@ pub mod pointer;
 
 use self::smtrs::composite::*;
 use self::smtrs::embed::{Embed,DeriveValues};
-use self::smtrs::domain::{Domain};
-use self::smtrs::types::{Sort,SortKind,Value};
+use self::smtrs::types::{Sort,SortKind};
 use self::num_bigint::BigInt;
 use self::num_traits::cast::ToPrimitive;
 use std::fmt::Debug;
@@ -22,7 +21,6 @@ use self::mem::{Bytes,FromConst,MemSlice,MemObj};
 use self::frame::*;
 use self::thread::*;
 use self::program::*;
-use self::error::{Errors,Error,add_error};
 use self::pointer::*;
 use self::llvm_ir::Module;
 use self::llvm_ir::datalayout::{DataLayout};
@@ -30,8 +28,8 @@ use self::llvm_ir::types::{Type};
 
 #[derive(PartialEq,Eq,PartialOrd,Ord,Hash,Copy,Clone,Debug)]
 pub struct InstructionRef<'a> {
-    basic_block: &'a String,
-    instruction: usize
+    pub basic_block: &'a String,
+    pub instruction: usize
 }
 
 pub enum TrErr<'a,V : Bytes + Clone,Err> {
@@ -188,15 +186,20 @@ pub fn translate_instr<'b,V,Em
                          -> Result<(Program<'b,V>,
                                     Transf<Em>),
                                    TrErr<'b,V,Em::Error>>
-    where V : 'b+Bytes+FromConst<'b>+IntValue+Vector+Pointer<'b>,Em : DeriveValues {
+    where V : 'b+Bytes+FromConst<'b>+IntValue+Vector+Pointer<'b>+Debug,Em : DeriveValues {
     debug_assert_eq!(prog.num_elem(),prog_inp.size());
     debug_assert_eq!(inp.num_elem(),inp_inp.size());
-    let (step,thr_idx) = match program_input_thread_activation(inp,inp_inp,&thread_id,em)? {
-        Some(r) => r,
-        None => {
-            let mut rinp = inp.clone();
-            rinp.add_thread(thread_id.clone());
-            return Err(TrErr::InputNeeded(rinp))
+    let (step,thr_idx) = if prog.is_single_threaded() {
+        let idx = em.const_bitvec(STEP_BW,BigInt::from(0))?;
+        (None,Transformation::constant(vec![idx]))
+    } else {
+        match program_input_thread_activation(inp,inp_inp,&thread_id,em)? {
+            Some((step,idx)) => (Some(step),idx),
+            None => {
+                let mut rinp = inp.clone();
+                rinp.add_thread(thread_id.clone());
+                return Err(TrErr::InputNeeded(rinp))
+            }
         }
     };
     let cur_thread_iter
@@ -206,17 +209,16 @@ pub fn translate_instr<'b,V,Em
                                  thr_idx,
                                  exprs,
                                  em)?;
-    let mut cur_frame_id = top_frame_id_iter(prog,prog_inp.clone(),cur_thread_iter)
+    let cur_frame_id = top_frame_id_iter(prog,prog_inp.clone(),cur_thread_iter)
         .filter(cf_id,filter_ctx_id);
     let cfs = cur_frame_id.clone().seq((prog,prog_inp.clone(),exprs),frame_id_to_call_frame_iter);
     let frs = cur_frame_id.seq((prog,prog_inp.clone(),exprs),frame_id_to_frame_iter);
     let mut ctxs = cfs.product(frs).cond_iter();
     match instr.content {
-        llvm_ir::InstructionC::Alloca(ref name,ref tp,ref sz,ref align) => {
+        llvm_ir::InstructionC::Alloca(ref name,ref tp,ref sz,_) => {
             let mut nprog = prog.clone();
             let mut updates = Vec::new();
             while let Some((cond,(cf_view,fr_view))) = ctxs.next(em)? {
-                println!("CONTEXT");
                 let (cf,cf_inp) = cf_view.get_with_inp(prog,prog_inp.clone());
                 let dyn = match sz {
                     &None => None,
@@ -260,7 +262,12 @@ pub fn translate_instr<'b,V,Em
                         Some(r) => r
                     }
                 };
-                let rcond = Transformation::and(cond.to_vec());
+                let rcond = if cond.len()==0 {
+                    let c = em.const_bool(true)?;
+                    Transformation::constant(vec![c])
+                } else {
+                    Transformation::and(cond.to_vec())
+                };
                 let (trg,trg_inp) = {
                     let Then(thr_view,fr_view_) = fr_view;
                     let (thr_id,thr_id_inp) = thread_view_to_idx(&thr_view,INDEX_WIDTH,em)?;
@@ -283,8 +290,14 @@ pub fn translate_instr<'b,V,Em
                 let (ptr3,ptr3_inp) = V::from_pointer(dl.pointer_alignment(0).0 as usize,ptr2,ptr2_inp);
                 instr_view.insert(&mut nprog,ptr3.as_obj(),ptr3_inp,&mut updates);
                 let act_view = cf_view.then(ActivationView::new());
-                let (acts,acts_inp) = act_view.get_with_inp(prog,prog_inp.clone());
-                let (nacts,nacts_inp) = choice_set_chosen(OptRef::Ref(acts),acts_inp,rcond,
+                let (acts,acts_inp) = if cond.len()==0 {
+                    let (r,inp) = choice_empty();
+                    (OptRef::Owned(r),inp)
+                } else {
+                    let (r,inp) = act_view.get_with_inp(prog,prog_inp.clone());
+                    (OptRef::Ref(r),inp)
+                };
+                let (nacts,nacts_inp) = choice_set_chosen(acts,acts_inp,rcond,
                                                           OptRef::Owned(Data(instr_id.next())),
                                                           Transformation::id(0))?;
                 act_view.write(nacts.as_obj(),nacts_inp,&mut nprog,&mut updates);
@@ -302,7 +315,7 @@ pub fn translate_value<'b,V,Em>(dl: &'b DataLayout,
                                 tps: &'b HashMap<String,Type>,
                                 cf: &CallFrame<'b,V>,
                                 cf_inp: Transf<Em>,
-                                exprs: &[Em::Expr],
+                                _: &[Em::Expr],
                                 em: &mut Em)
                                 -> Result<(V,Transf<Em>),Em::Error>
     where V : 'b+Bytes+FromConst<'b>+Pointer<'b>+IntValue+Vector+Clone,Em : DeriveValues {
@@ -330,7 +343,6 @@ pub fn translate_constant<'b,V,Em>(dl: &'b DataLayout,
 
     match c {
         &llvm_ir::Constant::Global(ref glb) => {
-            let (sz,_,_) = dl.pointer_alignment(0);
             let (ptr,inp_ptr) = base_pointer_global(glb,em)?;
             let (bw,_,_) = dl.pointer_alignment(0);
             let (res,inp_res) = V::from_pointer((bw/8) as usize,
@@ -641,8 +653,8 @@ impl Bytes for BitVecValue {
                     Ok(Some((OptRef::Owned(BitVecValue::BoolValue(len*8)),ninp)))
                 }
             },
-            &BitVecValue::BitVecValue(sz) => {
-                let rsz = sz/8;
+            &BitVecValue::BitVecValue(_) => {
+                //let rsz = sz/8;
                 unimplemented!()
                 //let ninp = Transformation::map_by_elem(Box::new(|_,_,e,em| { em.
             }
@@ -1012,7 +1024,7 @@ impl<'a,C : Composite+Clone> Bytes for ByteWidth<C> {
 impl<Ptr : Composite+Clone,V : Composite+Clone> Vector for CompValue<Ptr,V> {
     fn vector<'a,Em : Embed>(vec: OptRef<'a,Vec<Self>>,
                              inp_vec: Vec<Transf<Em>>,
-                             em: &mut Em)
+                             _: &mut Em)
                              -> Result<(OptRef<'a,Self>,Transf<Em>),Em::Error> {
         Ok((OptRef::Owned(CompValue::Vector(vec.as_obj())),
             Transformation::concat(&inp_vec)))

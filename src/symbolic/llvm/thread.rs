@@ -1,14 +1,13 @@
 extern crate smtrs;
 
 use self::smtrs::composite::*;
-use self::smtrs::embed::{Embed,DeriveConst,DeriveValues};
-use self::smtrs::domain::{Domain};
+use self::smtrs::embed::{Embed,DeriveConst};
 use super::mem::{Bytes,FromConst};
-use super::frame::{CallFrame,Frame,FrameId,ContextId};
+use super::frame::*;
 use super::{InstructionRef};
-use std::fmt::Debug;
 use std::marker::PhantomData;
 use num_bigint::BigInt;
+use std::ops::Range;
 
 pub type CallId<'a> = (Option<InstructionRef<'a>>,&'a String);
 
@@ -24,6 +23,180 @@ pub struct Thread<'a,V> {
     stack: Stack<'a,V>,
     stack_top: StackTop<'a>,
     ret: Option<V>
+}
+
+enum CallStackDataVars<'a,'b : 'a,V : 'b> {
+    CallFrame(CallFrameDataVars<'a,'b,V>),
+    Frame(Range<usize>)
+}
+
+enum ThreadDataVarsPos<'a,'b : 'a,V : 'b> {
+    CallStack { assoc_nr: usize,
+                stack_nr: usize,
+                iter: CallStackDataVars<'a,'b,V> },
+    Stack { assoc_nr: usize,
+            stack_nr: usize,
+            iter: Range<usize> },
+    Ret(Range<usize>)
+}
+
+pub struct ThreadDataVars<'a,'b : 'a,V : 'b> {
+    off: usize,
+    thread: &'a Thread<'b,V>,
+    iter: ThreadDataVarsPos<'a,'b,V>
+}
+
+impl<'a,'b,V : Bytes+FromConst<'b>> Iterator for ThreadDataVars<'a,'b,V> {
+    type Item = usize;
+    fn next(&mut self) -> Option<usize> {
+        'outer: loop {
+            let niter = match self.iter {
+                ThreadDataVarsPos::CallStack { ref mut assoc_nr, ref mut stack_nr, ref mut iter } => {
+                    let niter = match iter {
+                        &mut CallStackDataVars::CallFrame(ref mut siter) => match siter.next() {
+                            Some(r) => return Some(r),
+                            None => {
+                                let &(_,ref frs) = self.thread.call_stack.entry(*assoc_nr);
+                                let &(_,ref fr) = frs.entry(*stack_nr);
+                                let (fr_sz,niter) = fr.data_vars(self.off);
+                                self.off+=fr_sz;
+                                Some(CallStackDataVars::Frame(niter))
+                            }
+                        },
+                        &mut CallStackDataVars::Frame(ref mut siter) => match siter.next() {
+                            Some(r) => return Some(r),
+                            None => None
+                        }
+                    };
+                    match niter {
+                        Some(it) => {
+                            *iter = it;
+                            continue
+                        },
+                        None => {
+                            let &(_,ref st) = self.thread.call_stack.entry(*assoc_nr);
+                            if *stack_nr+1<st.len() {
+                                *stack_nr+=1;
+                                let (sz,nit) = st.entry(*stack_nr).0.data_vars(self.off);
+                                self.off+=sz;
+                                *iter = CallStackDataVars::CallFrame(nit);
+                                continue
+                            }
+                            for p in *assoc_nr+1..self.thread.call_stack.len() {
+                                self.off+=1;
+                                let cfs = &self.thread.call_stack.entry(p).1;
+                                if cfs.len() > 0 {
+                                    *assoc_nr = p;
+                                    *stack_nr = 0;
+                                    let &(ref cf,_) = cfs.entry(0);
+                                    let (sz,nit) = cf.data_vars(self.off);
+                                    self.off+=sz;
+                                    *iter = CallStackDataVars::CallFrame(nit);
+                                    continue 'outer
+                                }
+                            }
+                            {
+                                let mut nxt_fr = None;
+                                for fr_pos in 0..self.thread.stack.len() {
+                                    let entr = &self.thread.stack.entry(fr_pos).1;
+                                    if entr.len() > 0 {
+                                        let (sz,it) = entr.entry(0).data_vars(self.off);
+                                        self.off+=sz;
+                                        nxt_fr = Some((fr_pos,it));
+                                        break
+                                    }
+                                }
+                                match nxt_fr {
+                                    None => return None,
+                                    Some((pos,it)) => ThreadDataVarsPos::Stack { assoc_nr: pos,
+                                                                                 stack_nr: 0,
+                                                                                 iter: it }
+                                }
+                            }
+                        }
+                    }
+                },
+                ThreadDataVarsPos::Stack { ref mut assoc_nr, ref mut stack_nr, ref mut iter } => {
+                    match iter.next() {
+                        Some(r) => return Some(r),
+                        None => {
+                            let &(_,ref st) = self.thread.stack.entry(*assoc_nr);
+                            if *stack_nr+1<st.len() {
+                                *stack_nr+=1;
+                                let (sz,nit) = st.entry(*stack_nr).data_vars(self.off);
+                                self.off+=sz;
+                                *iter = nit;
+                                continue
+                            }
+                            for p in *assoc_nr+1..self.thread.stack.len() {
+                                let cfs = &self.thread.stack.entry(p).1;
+                                if cfs.len() > 0 {
+                                    *assoc_nr = p;
+                                    *stack_nr = 0;
+                                    let (sz,nit) = cfs.entry(0).data_vars(self.off);
+                                    self.off+=sz;
+                                    *iter = nit;
+                                    continue 'outer
+                                }
+                            }
+                            let top_sz = self.thread.stack_top.num_elem();
+                            let ret_sz = self.thread.ret.num_elem();
+                            self.off+=top_sz;
+                            let coff = self.off;
+                            self.off+=ret_sz;
+                            ThreadDataVarsPos::Ret(coff..coff+ret_sz)
+                        }
+                    }
+                },
+                ThreadDataVarsPos::Ret(ref mut it) => match it.next() {
+                    Some(r) => return Some(r),
+                    None => return None
+                }
+            };
+            self.iter = niter;
+        }
+    }
+}
+
+impl<'a,V : Bytes+FromConst<'a>> Thread<'a,V> {
+    pub fn data_vars<'b>(&'b self,mut off: usize) -> ThreadDataVars<'b,'a,V> {
+        for cs_idx in 0..self.call_stack.len() {
+            off+=1;
+            let &(_,ref cs) = self.call_stack.entry(cs_idx);
+            if cs.len()>0 {
+                let &(ref cf,_) = cs.entry(0);
+                let (sz,it) = cf.data_vars(off);
+                return ThreadDataVars { off: off+sz,
+                                        thread: self,
+                                        iter: ThreadDataVarsPos::CallStack {
+                                            assoc_nr: cs_idx,
+                                            stack_nr: 0,
+                                            iter: CallStackDataVars::CallFrame(it)
+                                        }
+                }
+            }
+        }
+        for st_idx in 0..self.stack.len() {
+            let st = &self.stack.entry(st_idx).1;
+            if st.len()>0 {
+                let fr = st.entry(0);
+                let (sz,it) = fr.data_vars(off);
+                return ThreadDataVars { off: off+sz,
+                                        thread: self,
+                                        iter: ThreadDataVarsPos::Stack {
+                                            assoc_nr: st_idx,
+                                            stack_nr: 0,
+                                            iter: it
+                                        }
+                }
+            }
+        }
+        let top_sz = self.stack_top.num_elem();
+        let ret_sz = self.ret.num_elem();
+        ThreadDataVars { off: off+top_sz,
+                         thread: self,
+                         iter: ThreadDataVarsPos::Ret(off+top_sz..off+top_sz+ret_sz) }
+    }
 }
 
 pub fn get_top_call_frame<'a,'b,V,Em>(cfs: OptRef<'a,CallStack<'b,V>>,
@@ -45,7 +218,7 @@ pub fn get_top_call_frame<'a,'b,V,Em>(cfs: OptRef<'a,CallStack<'b,V>>,
 pub fn call_frame_activation<'a,'b,'c,Em>(top: OptRef<'a,StackTop<'b>>,
                                           top_inp: Transf<Em>,
                                           cf_id: &CallId<'b>,
-                                          em: &mut Em)
+                                          _: &mut Em)
                                           -> Result<Transf<Em>,Em::Error>
     where Em : Embed {
     let mut res = Vec::new();
@@ -271,7 +444,7 @@ impl<'b,V : Bytes+FromConst<'b>> Composite for Thread<'b,V> {
     }
 }
 
-#[derive(PartialEq,Eq)]
+#[derive(PartialEq,Eq,Debug)]
 pub struct CallStackView<'a,V : 'a>(PhantomData<&'a V>);
 
 impl<'a,V : 'a> Clone for CallStackView<'a,V> {
@@ -280,7 +453,7 @@ impl<'a,V : 'a> Clone for CallStackView<'a,V> {
     }
 }
 
-#[derive(PartialEq,Eq)]
+#[derive(PartialEq,Eq,Debug)]
 pub struct StackView<'a,V : 'a>(PhantomData<&'a V>);
 
 impl<'a,V : 'a> Clone for StackView<'a,V> {
@@ -289,7 +462,7 @@ impl<'a,V : 'a> Clone for StackView<'a,V> {
     }
 }
 
-#[derive(PartialEq,Eq)]
+#[derive(PartialEq,Eq,Debug)]
 pub struct StackTopView<'a,V : 'a>(PhantomData<&'a V>);
 
 impl<'a,V : 'a> Clone for StackTopView<'a,V> {
@@ -298,7 +471,7 @@ impl<'a,V : 'a> Clone for StackTopView<'a,V> {
     }
 }
 
-#[derive(PartialEq,Eq)]
+#[derive(PartialEq,Eq,Debug)]
 pub struct RetView<'a,V : 'a>(PhantomData<&'a V>);
 
 impl<'a,V : 'a> Clone for RetView<'a,V> {

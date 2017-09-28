@@ -33,7 +33,7 @@ pub fn base_pointer_gep<'a,'b,'c,Em : Embed>(ptr: OptRef<'a,BasePointer<'b>>,
                                              gep: Vec<(Option<(Singleton,Transf<Em>)>,usize)>,
                                              em: &mut Em)
                                              -> Result<(OptRef<'c,BasePointer<'b>>,Transf<Em>),Em::Error> {
-    let (nptr,inp_nptr) = ptr.as_obj().map(inp_ptr,em,&|inp_cond,base,inp_base,em| {
+    let (nptr,inp_nptr) = ptr.as_obj().map(inp_ptr,em,&|inp_cond,base,inp_base,_| {
         let (trg,inp_trg,off,inp_off) = decompose_tuple(OptRef::Owned(base),inp_base);
         let mut coff = off;
         let mut inp_coff = inp_off;

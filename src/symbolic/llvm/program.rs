@@ -3,7 +3,6 @@ extern crate llvm_ir;
 
 use self::smtrs::composite::*;
 use self::smtrs::embed::{Embed,DeriveConst,DeriveValues};
-use self::smtrs::domain::{Domain};
 use super::mem::{Bytes,FromConst,MemSlice};
 use super::{InstructionRef};
 use super::thread::*;
@@ -11,10 +10,10 @@ use super::frame::*;
 use super::pointer::{PointerTrg};
 use super::error::{Error,Errors,add_error};
 use std::marker::PhantomData;
-use std::fmt::Debug;
 use num_bigint::BigInt;
+use std::ops::Range;
 
-const STEP_BW: usize = 32;
+pub const STEP_BW: usize = 32;
 
 pub type ThreadId<'a> = (Option<InstructionRef<'a>>,&'a String);
 
@@ -43,11 +42,103 @@ pub struct ProgramInput<'a,V> {
     nondet: Nondet<'a,V>
 }
 
-impl<'a,V : Bytes+FromConst<'a>+Clone> Program<'a,V> {
+enum ProgramDataVarsPos<'a,'b : 'a,V : 'b> {
+    Threads { assoc_nr: usize,
+              pool_nr: usize,
+              iter: ThreadDataVars<'a,'b,V> },
+    Globals(Range<usize>),
+    Heap(Range<usize>)
+}
+
+pub struct ProgramDataVars<'a,'b : 'a,V : 'b> {
+    off: usize,
+    program: &'a Program<'b,V>,
+    iter: ProgramDataVarsPos<'a,'b,V>
+}
+
+impl<'a,'b,V : Bytes+FromConst<'b>> Iterator for ProgramDataVars<'a,'b,V> {
+    type Item = usize;
+    fn next(&mut self) -> Option<usize> {
+        'outer: loop {
+            let niter = match self.iter {
+                ProgramDataVarsPos::Threads { ref mut assoc_nr, ref mut pool_nr, ref mut iter } => match iter.next() {
+                    Some(r) => return Some(r),
+                    None => {
+                        let &(_,ref pool) = self.program.threads.entry(*assoc_nr);
+                        if *pool_nr+1<pool.len() {
+                            *pool_nr+=1;
+                            let thr = &pool[*pool_nr];
+                            *iter = thr.data_vars(self.off);
+                            self.off+=thr.num_elem();
+                            continue
+                        } else {
+                            for i in *assoc_nr+1..self.program.threads.len() {
+                                let &(_,ref pool) = self.program.threads.entry(i);
+                                if pool.len() > 0 {
+                                    let thr = &pool[0];
+                                    let it = thr.data_vars(self.off);
+                                    *assoc_nr = i;
+                                    *pool_nr = 0;
+                                    *iter = it;
+                                    self.off+=thr.num_elem();
+                                    continue 'outer
+                                }
+                            }
+                            let coff = self.off;
+                            let sz = self.program.global.num_elem();
+                            self.off+=sz;
+                            ProgramDataVarsPos::Globals(coff..self.off)
+                        }
+                    }
+                },
+                ProgramDataVarsPos::Globals(ref mut it) => match it.next() {
+                    Some(r) => return Some(r),
+                    None => {
+                        let coff = self.off;
+                        let sz = self.program.heap.num_elem();
+                        self.off+=sz;
+                        ProgramDataVarsPos::Heap(coff..self.off)
+                    }
+                },
+                ProgramDataVarsPos::Heap(ref mut it) => match it.next() {
+                    Some(r) => return Some(r),
+                    None => return None
+                }
+            };
+            self.iter = niter;
+        }
+    }
+}
+
+impl<'a,V : Bytes+FromConst<'a>> Program<'a,V> {
     pub fn new() -> Self {
         Program { threads: Assoc::new(),
                   global: Assoc::new(),
                   heap: Assoc::new() }
+    }
+    pub fn is_single_threaded(&self) -> bool {
+        match self.threads.is_single() {
+            None => false,
+            Some(&(_,ref thrs)) => thrs.len()==1
+        }
+    }
+    pub fn data_vars<'b>(&'b self) -> ProgramDataVars<'b,'a,V> {
+        for pool_idx in 0..self.threads.len() {
+            let &(_,ref pool) = self.threads.entry(pool_idx);
+            if pool.len() > 0 {
+                let thr = &pool[0];
+                let off = thr.num_elem();
+                return ProgramDataVars { off: off,
+                                         program: self,
+                                         iter: ProgramDataVarsPos::Threads { assoc_nr: pool_idx,
+                                                                             pool_nr: 0,
+                                                                             iter: thr.data_vars(0) } }
+            }
+        }
+        let sz = self.global.num_elem();
+        ProgramDataVars { off: sz,
+                          program: self,
+                          iter: ProgramDataVarsPos::Globals(0..sz) }
     }
 }
 
@@ -64,7 +155,7 @@ impl<'a,V : Bytes+Clone> ProgramInput<'a,V> {
 pub fn program_input_thread_activation<'a,'b,V,Em>(inp: &ProgramInput<'b,V>,
                                                    inp_inp: Transf<Em>,
                                                    thread_id: &ThreadId<'b>,
-                                                   em: &mut Em)
+                                                   _: &mut Em)
                                                    -> Result<Option<(Transf<Em>,Transf<Em>)>,Em::Error>
     where V : Bytes + Clone, Em : Embed {
     match inp.step.choices(inp_inp).find(|&(&(ref dat,_),_,_)| dat.0==*thread_id) {
@@ -404,13 +495,13 @@ impl<'b,V : Bytes + Clone> Composite for ProgramInput<'b,V> {
 
 // Views for Program
 
-#[derive(Clone,PartialEq,Eq)]
+#[derive(Clone,PartialEq,Eq,Debug)]
 pub struct ThreadsView<'a,V : 'a>(PhantomData<&'a V>);
 
-#[derive(Clone,PartialEq,Eq)]
+#[derive(Clone,PartialEq,Eq,Debug)]
 pub struct GlobalsView<'a,V : 'a>(PhantomData<&'a V>);
 
-#[derive(Clone,PartialEq,Eq)]
+#[derive(Clone,PartialEq,Eq,Debug)]
 pub struct HeapView<'a,V : 'a>(PhantomData<&'a V>);
 
 impl<'a,V : 'a+Bytes+FromConst<'a>> View for ThreadsView<'a,V> {
@@ -507,7 +598,7 @@ impl<'a,V> HeapView<'a,V> {
 
 pub struct CurrentThreadIter<'a,V,Em : DeriveValues> {
     phantom: PhantomData<V>,
-    step: Transf<Em>,
+    step: Option<Transf<Em>>,
     thr_id: ThreadId<'a>,
     iter: IndexedIter<Em>
 }
@@ -516,7 +607,7 @@ impl<'a,Em : DeriveValues,V : 'a+Bytes+FromConst<'a>+Clone
      > CurrentThreadIter<'a,V,Em> {
     pub fn new(prog: &Program<'a,V>,
                thr_id: ThreadId<'a>,
-               step: Transf<Em>,
+               step: Option<Transf<Em>>,
                thr_idx: Transf<Em>,
                exprs: &[Em::Expr],
                em: &mut Em) -> Result<CurrentThreadIter<'a,V,Em>,Em::Error> {
@@ -524,7 +615,7 @@ impl<'a,Em : DeriveValues,V : 'a+Bytes+FromConst<'a>+Clone
             phantom: PhantomData,
             step: step,
             thr_id: thr_id,
-            iter: access_dyn(prog.threads.access(&thr_id),thr_idx,exprs,em)?
+            iter: access_dyn(prog.threads.access(&thr_id).1,thr_idx,exprs,em)?
         })
     }
 }
@@ -557,7 +648,9 @@ impl<'a,Em : DeriveValues,V : 'a> CondIterator<Em> for CurrentThreadIter<'a,V,Em
     fn next(&mut self,conds: &mut Vec<Transf<Em>>,pos: usize,em: &mut Em)
             -> Result<Option<Self::Item>,Em::Error> {
         if conds.len()==pos {
-            conds.push(self.step.clone());
+            if let Some(ref step_) = self.step {
+                conds.push(step_.clone());
+            }
         }
         match self.iter.next(conds,pos+1,em)? {
             None => Ok(None),
@@ -663,7 +756,7 @@ pub fn frame_id_to_frame_iter<'a,V,Em>
                                .before(CallStackView::new()))
                .before(thr_view))
         },
-        ContextId::Stack(cid,instr) => {
+        ContextId::Stack(_,instr) => {
             let st_view = thr_view.clone()
                 .then(Then::new(StackView::new(),
                                 AssocView::new(instr.clone())));

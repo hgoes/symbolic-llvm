@@ -80,7 +80,6 @@ impl<'a,V : Bytes+FromConst<'a>+Clone> MemSlice<'a,V> {
         let mut it = vec_iter(vec,inp_sl);
         while let Some((obj,obj_inp)) = it.next() {
             let bw = obj.as_ref().byte_width();
-            let sz = obj.as_ref().num_elem();
             if off<acc+bw {
                 if off==acc && bw==len {
                     return MemObj::as_value(obj,obj_inp,em)
@@ -106,12 +105,11 @@ impl<'a,V : Bytes+FromConst<'a>+Clone> MemSlice<'a,V> {
                     }
                 };
                 acc+=bw;
-                let mut rest = len+acc-off;
+                let rest = len+acc-off;
                 let mut cur = start;
                 let mut cur_inp = inp_start;
                 while let Some((obj,obj_inp)) = it.next() {
                     let bw = obj.as_ref().byte_width();
-                    let sz = obj.as_ref().num_elem();
                     let (val,val_inp) = match MemObj::as_value(obj,obj_inp,em)? {
                         None => return Ok(None),
                         Some(res) => res
@@ -178,14 +176,6 @@ impl<'a,V : Bytes+FromConst<'a>+Clone> MemSlice<'a,V> {
             }
         }
     }
-    fn index<'b>(sl: OptRef<'b,Self>,
-                 idx: usize)
-                 -> OptRef<'b,MemObj<'a,V>> {
-        match sl {
-            OptRef::Ref(ref rsl) => OptRef::Ref(&rsl.0[idx]),
-            OptRef::Owned(mut rsl) => OptRef::Owned(rsl.0.swap_remove(idx))
-        }
-    }
 }
 
 impl<'a,V : Bytes+FromConst<'a>> MemObj<'a,V> {
@@ -243,7 +233,7 @@ impl<'a,V : Bytes+FromConst<'a>> MemObj<'a,V> {
     }
 }
 
-impl<'a,V : Bytes+FromConst<'a>+Clone> Composite for MemSlice<'a,V> {
+impl<'a,V : Bytes+FromConst<'a>> Composite for MemSlice<'a,V> {
     fn num_elem(&self) -> usize {
         self.0.iter().map(|obj| match *obj {
             MemObj::FreshObj(_) => 0,
