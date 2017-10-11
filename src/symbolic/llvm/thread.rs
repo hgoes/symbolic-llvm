@@ -6,8 +6,11 @@ use super::mem::{Bytes,FromConst};
 use super::frame::*;
 use super::{InstructionRef};
 use std::marker::PhantomData;
-use num_bigint::BigInt;
+use num_bigint::{BigInt,BigUint};
 use std::ops::Range;
+use std::cmp::Ordering;
+use std::hash::{Hash,Hasher};
+use std::fmt;
 
 pub type CallId<'a> = (Option<InstructionRef<'a>>,&'a String);
 
@@ -642,12 +645,12 @@ pub fn frame_view_to_idx<'a,V,Em : Embed>(view: &FrameView<'a,V>,bw: usize,em: &
                                           -> Result<(FrameId<'a>,Transf<Em>),Em::Error> {
     match view {
         &FrameView::Call(Then(_,Then(ref cid,Then(ref vec,_)))) => {
-            let e = em.const_bitvec(bw,BigInt::from(vec.idx))?;
+            let e = em.const_bitvec(bw,BigUint::from(vec.idx))?;
             let inp = Transformation::constant(vec![e]);
             Ok((FrameId::Call(cid.key.clone()),inp))
         },
         &FrameView::Stack(Then(_,Then(ref iid,ref vec))) => {
-            let e = em.const_bitvec(bw,BigInt::from(vec.idx))?;
+            let e = em.const_bitvec(bw,BigUint::from(vec.idx))?;
             let inp = Transformation::constant(vec![e]);
             Ok((FrameId::Stack(iid.key.clone()),inp))
         }
@@ -701,5 +704,201 @@ impl<'a,V> ViewMut for FrameView<'a,V>
             &FrameView::Stack(ref view)
                 => view.get_el_mut_ext(obj)
         }
+    }
+}
+
+pub enum ThreadMeaning<'b,V : Semantic+Bytes+FromConst<'b>> {
+    CallStack(<CallStack<'b,V> as Semantic>::Meaning),
+    Stack(<Stack<'b,V> as Semantic>::Meaning),
+    StackTop(<StackTop<'b> as Semantic>::Meaning),
+    Ret(<Option<V> as Semantic>::Meaning)
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> PartialEq for ThreadMeaning<'b,V> {
+    fn eq(&self,other: &ThreadMeaning<'b,V>) -> bool {
+        match self {
+            &ThreadMeaning::CallStack(ref p) => match other {
+                &ThreadMeaning::CallStack(ref q) => p.eq(q),
+                _ => false
+            },
+            &ThreadMeaning::Stack(ref p) => match other {
+                &ThreadMeaning::Stack(ref q) => p.eq(q),
+                _ => false
+            },
+            &ThreadMeaning::StackTop(ref p) => match other {
+                &ThreadMeaning::StackTop(ref q) => p.eq(q),
+                _ => false
+            },
+            &ThreadMeaning::Ret(ref p) => match other {
+                &ThreadMeaning::Ret(ref q) => p.eq(q),
+                _ => false
+            }
+        }
+    }
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> Eq for ThreadMeaning<'b,V> {}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> PartialOrd for ThreadMeaning<'b,V> {
+    fn partial_cmp(&self,other: &ThreadMeaning<'b,V>) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> Ord for ThreadMeaning<'b,V> {
+    fn cmp(&self,other: &ThreadMeaning<'b,V>) -> Ordering {
+        match (self,other) {
+            (&ThreadMeaning::CallStack(ref p),
+             &ThreadMeaning::CallStack(ref q)) => p.cmp(q),
+            (&ThreadMeaning::CallStack(_),_) => Ordering::Less,
+            (_,&ThreadMeaning::CallStack(_)) => Ordering::Greater,
+            (&ThreadMeaning::Stack(ref p),
+             &ThreadMeaning::Stack(ref q)) => p.cmp(q),
+            (&ThreadMeaning::Stack(_),_) => Ordering::Less,
+            (_,&ThreadMeaning::Stack(_)) => Ordering::Greater,
+            (&ThreadMeaning::StackTop(ref p),
+             &ThreadMeaning::StackTop(ref q)) => p.cmp(q),
+            (&ThreadMeaning::StackTop(_),_) => Ordering::Less,
+            (_,&ThreadMeaning::StackTop(_)) => Ordering::Greater,
+            (&ThreadMeaning::Ret(ref p),
+             &ThreadMeaning::Ret(ref q)) => p.cmp(q),
+        }
+    }
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> Hash for ThreadMeaning<'b,V> {
+    fn hash<H>(&self, state: &mut H) where H: Hasher {
+        match self {
+            &ThreadMeaning::CallStack(ref p) => {
+                (0 as u8).hash(state);
+                p.hash(state);
+            },
+            &ThreadMeaning::Stack(ref p) => {
+                (1 as u8).hash(state);
+                p.hash(state);
+            },
+            &ThreadMeaning::StackTop(ref p) => {
+                (2 as u8).hash(state);
+                p.hash(state);
+            },
+            &ThreadMeaning::Ret(ref p) => {
+                (3 as u8).hash(state);
+                p.hash(state);
+            }
+        }
+    }
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> fmt::Debug for ThreadMeaning<'b,V> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        match self {
+            &ThreadMeaning::CallStack(ref p) => f.debug_tuple("CallStack")
+                .field(p).finish(),
+            &ThreadMeaning::Stack(ref p) => f.debug_tuple("Stack")
+                .field(p).finish(),
+            &ThreadMeaning::StackTop(ref p) => f.debug_tuple("StackTop")
+                .field(p).finish(),
+            &ThreadMeaning::Ret(ref p) => f.debug_tuple("Ret")
+                .field(p).finish()
+        }
+    }
+}
+
+pub enum ThreadMeanings<'a,'b : 'a,V : 'a+Semantics<'a>+Bytes+FromConst<'b>> {
+    CallStack(<CallStack<'b,V> as Semantics<'a>>::Meanings,&'a Thread<'b,V>),
+    Stack(<Stack<'b,V> as Semantics<'a>>::Meanings,&'a Thread<'b,V>),
+    StackTop(<StackTop<'b> as Semantics<'a>>::Meanings,&'a Thread<'b,V>),
+    Ret(<Option<V> as Semantics<'a>>::Meanings),
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> ThreadMeaning<'b,V> {
+    pub fn is_pc(&self) -> bool {
+        match self {
+            &ThreadMeaning::CallStack(ref m) => match m.meaning {
+                BitVecVectorStackMeaning::Top => true,
+                BitVecVectorStackMeaning::Elem(_,ref m) => match m {
+                    &TupleMeaning::Fst(ref m) => m.is_pc(),
+                    &TupleMeaning::Snd(ref m) => m.is_pc()
+                }
+            },
+            &ThreadMeaning::Stack(ref m) => match m.meaning {
+                BitVecVectorStackMeaning::Top => true,
+                BitVecVectorStackMeaning::Elem(_,ref m) => m.is_pc()
+            },
+            &ThreadMeaning::StackTop(_) => true,
+            &ThreadMeaning::Ret(_) => false
+        }
+    }
+}
+
+impl<'a,'b : 'a,V : 'a+Semantics<'a>+Bytes+FromConst<'b>> Iterator for ThreadMeanings<'a,'b,V> {
+    type Item = ThreadMeaning<'b,V>;
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            *self = match self {
+                &mut ThreadMeanings::CallStack(ref mut it,thr) => match it.next() {
+                    Some(r) => return Some(ThreadMeaning::CallStack(r)),
+                    None => ThreadMeanings::Stack(thr.stack.meanings(),thr)
+                },
+                &mut ThreadMeanings::Stack(ref mut it,thr) => match it.next() {
+                    Some(r) => return Some(ThreadMeaning::Stack(r)),
+                    None => ThreadMeanings::StackTop(thr.stack_top.meanings(),thr)
+                },
+                &mut ThreadMeanings::StackTop(ref mut it,thr) => match it.next() {
+                    Some(r) => return Some(ThreadMeaning::StackTop(r)),
+                    None => ThreadMeanings::Ret(thr.ret.meanings())
+                },
+                &mut ThreadMeanings::Ret(ref mut it) => match it.next() {
+                    Some(r) => return Some(ThreadMeaning::Ret(r)),
+                    None => return None
+                }
+            }
+        }
+    }
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for Thread<'b,V> {
+    type Meaning = ThreadMeaning<'b,V>;
+    fn meaning(&self,pos: usize) -> Self::Meaning {
+        let off1 = self.call_stack.num_elem();
+        if pos<off1 {
+            return ThreadMeaning::CallStack(self.call_stack.meaning(pos))
+        }
+        let off2 = off1+self.stack.num_elem();
+        if pos<off2 {
+            return ThreadMeaning::Stack(self.stack.meaning(pos-off1))
+        }
+        let off3 = off2+self.stack_top.num_elem();
+        if pos<off3 {
+            return ThreadMeaning::StackTop(self.stack_top.meaning(pos-off2))
+        }
+        ThreadMeaning::Ret(self.ret.meaning(pos-off3))
+    }
+    fn fmt_meaning<F : fmt::Write>(&self,m: &Self::Meaning,fmt: &mut F) -> Result<(),fmt::Error> {
+        match m {
+            &ThreadMeaning::CallStack(ref nm) => {
+                write!(fmt,"cs.")?;
+                self.call_stack.fmt_meaning(nm,fmt)
+            },
+            &ThreadMeaning::Stack(ref nm) => {
+                write!(fmt,"st.")?;
+                self.stack.fmt_meaning(nm,fmt)
+            },
+            &ThreadMeaning::StackTop(ref nm) => {
+                write!(fmt,"top.")?;
+                self.stack_top.fmt_meaning(nm,fmt)
+            },
+            &ThreadMeaning::Ret(ref nm) => {
+                write!(fmt,"ret.")?;
+                self.ret.fmt_meaning(nm,fmt)
+            }
+        }
+    }
+}
+
+impl<'a,'b : 'a,V : 'a+Semantics<'a>+Bytes+FromConst<'b>> Semantics<'a> for Thread<'b,V> {
+    type Meanings = ThreadMeanings<'a,'b,V>;
+    fn meanings(&'a self) -> Self::Meanings {
+        ThreadMeanings::CallStack(self.call_stack.meanings(),self)
     }
 }

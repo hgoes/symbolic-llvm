@@ -7,6 +7,9 @@ use super::{InstructionRef};
 use super::thread::CallId;
 use std::marker::PhantomData;
 use std::ops::Range;
+use std::cmp::Ordering;
+use std::hash::{Hash,Hasher};
+use std::fmt;
 
 #[derive(PartialEq,Eq,PartialOrd,Ord,Hash,Clone,Debug)]
 pub enum ContextId<'a> {
@@ -20,24 +23,26 @@ pub enum FrameId<'a> {
     Stack(InstructionRef<'a>)
 }
 
-pub type PrevFrame<'a> = Choice<Option<Data<ContextId<'a>>>>;
+pub type PrevFrame<'a> = Choice<Data<Option<ContextId<'a>>>>;
 
 pub type Allocations<'a,V> = Assoc<InstructionRef<'a>,Vec<MemSlice<'a,V>>>;
 
 pub type Activation<'a> = Choice<Data<InstructionRef<'a>>>;
 
+pub type Phi<'a> = Choice<Data<(&'a String,&'a String)>>;
+
 #[derive(PartialEq,Eq,Hash,Clone,Debug)]
 pub struct Frame<'a,V> {
-    previous: PrevFrame<'a>,
-    allocations: Allocations<'a,V>
+    pub previous: PrevFrame<'a>,
+    pub allocations: Allocations<'a,V>
 }
 
 #[derive(PartialEq,Eq,Hash,Clone,Debug)]
 pub struct CallFrame<'a,V> {
-    values: Assoc<&'a String,V>,
-    arguments: Vec<V>,
-    activation: Activation<'a>,
-    phi: Choice<Data<&'a String>>
+    pub values: Assoc<&'a String,V>,
+    pub arguments: Vec<V>,
+    pub activation: Activation<'a>,
+    pub phi: Phi<'a>
 }
 
 enum CallFrameDataVarsPos {
@@ -149,7 +154,7 @@ pub fn call_frame<'a,'b,'c,V,Em>(vals: OptRef<'a,Assoc<&'b String,V>>,
                                  inp_args: Transf<Em>,
                                  acts: OptRef<'a,Activation<'b>>,
                                  inp_acts: Transf<Em>,
-                                 phi: OptRef<'a,Choice<Data<&'b String>>>,
+                                 phi: OptRef<'a,Phi<'b>>,
                                  inp_phi: Transf<Em>)
                                  -> (OptRef<'c,CallFrame<'b,V>>,Transf<Em>)
     where V : Bytes+FromConst<'b>+Clone,Em : Embed {
@@ -172,7 +177,7 @@ pub fn decompose_callframe<'a,'b,V,Em>(cf: OptRef<'a,CallFrame<'b,V>>,inp_cf: Tr
                                            Transf<Em>,
                                            OptRef<'a,Activation<'b>>,
                                            Transf<Em>,
-                                           OptRef<'a,Choice<Data<&'b String>>>,
+                                           OptRef<'a,Phi<'b>>,
                                            Transf<Em>)
     where V : FromConst<'b>+Clone,Em : Embed {
     let (vals,args,acts,phi) = match cf {
@@ -559,7 +564,7 @@ impl<'a,V> ViewMut for ActivationView<'a,V>
 impl<'a,V> View for PhiView<'a,V>
     where V : 'a + Bytes+FromConst<'a> {
     type Viewed = CallFrame<'a,V>;
-    type Element = Choice<Data<&'a String>>;
+    type Element = Phi<'a>;
     fn get_el<'b>(&self,obj: &'b Self::Viewed)
                   -> &'b Self::Element where Self : 'b {
         &obj.phi
@@ -584,5 +589,327 @@ impl<'a,V> ViewMut for PhiView<'a,V>
         (obj.values.num_elem()+
          obj.arguments.num_elem()+
          obj.activation.num_elem(),&mut obj.phi)
+    }
+}
+
+pub enum FrameMeaning<'b,V : Semantic+Bytes+FromConst<'b>> {
+    Previous(<PrevFrame<'b> as Semantic>::Meaning),
+    Allocations(<Allocations<'b,V> as Semantic>::Meaning)
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> PartialEq for FrameMeaning<'b,V> {
+    fn eq(&self,other: &FrameMeaning<'b,V>) -> bool {
+        match self {
+            &FrameMeaning::Previous(ref p) => match other {
+                &FrameMeaning::Previous(ref q) => p.eq(q),
+                _ => false
+            },
+            &FrameMeaning::Allocations(ref p) => match other {
+                &FrameMeaning::Allocations(ref q) => p.eq(q),
+                _ => false
+            }
+        }
+    }
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> Eq for FrameMeaning<'b,V> {}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> PartialOrd for FrameMeaning<'b,V> {
+    fn partial_cmp(&self,other: &FrameMeaning<'b,V>) -> Option<Ordering> {
+        match (self,other) {
+            (&FrameMeaning::Previous(ref p),
+             &FrameMeaning::Previous(ref q)) => p.partial_cmp(q),
+            (&FrameMeaning::Previous(ref p),_) => Some(Ordering::Less),
+            (&FrameMeaning::Allocations(ref p),
+             &FrameMeaning::Allocations(ref q)) => p.partial_cmp(q),
+            _ => Some(Ordering::Greater)
+        }
+    }
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> Ord for FrameMeaning<'b,V> {
+    fn cmp(&self,other: &FrameMeaning<'b,V>) -> Ordering {
+        match (self,other) {
+            (&FrameMeaning::Previous(ref p),
+             &FrameMeaning::Previous(ref q)) => p.cmp(q),
+            (&FrameMeaning::Previous(ref p),_) => Ordering::Less,
+            (&FrameMeaning::Allocations(ref p),
+             &FrameMeaning::Allocations(ref q)) => p.cmp(q),
+            _ => Ordering::Greater
+        }
+    }
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> Hash for FrameMeaning<'b,V> {
+    fn hash<H>(&self, state: &mut H) where H: Hasher {
+        match self {
+            &FrameMeaning::Previous(ref p) => {
+                (0 as u8).hash(state);
+                p.hash(state);
+            },
+            &FrameMeaning::Allocations(ref p) => {
+                (1 as u8).hash(state);
+                p.hash(state);
+            }
+        }
+    }
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> fmt::Debug for FrameMeaning<'b,V> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        match self {
+            &FrameMeaning::Previous(ref p) => f.debug_tuple("Previous")
+                .field(p).finish(),
+            &FrameMeaning::Allocations(ref p) => f.debug_tuple("Allocations")
+                .field(p).finish()
+        }
+    }
+}
+
+pub enum FrameMeanings<'a,'b : 'a,V : 'a+Semantics<'a>+Bytes+FromConst<'b>> {
+    Previous(<PrevFrame<'b> as Semantics<'a>>::Meanings,&'a Allocations<'b,V>),
+    Allocations(<Allocations<'b,V> as Semantics<'a>>::Meanings)
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> FrameMeaning<'b,V> {
+    pub fn is_pc(&self) -> bool {
+        match self {
+            &FrameMeaning::Previous(_) => true,
+            &FrameMeaning::Allocations(_) => false
+        }
+    }
+}
+
+impl<'a,'b : 'a,V : 'a+Semantics<'a>+Bytes+FromConst<'b>> Iterator for FrameMeanings<'a,'b,V> {
+    type Item = FrameMeaning<'b,V>;
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            *self = match self {
+                &mut FrameMeanings::Previous(ref mut it,ref allocs) => match it.next() {
+                    Some(r) => return Some(FrameMeaning::Previous(r)),
+                    None => FrameMeanings::Allocations(allocs.meanings())
+                },
+                &mut FrameMeanings::Allocations(ref mut it) => match it.next() {
+                    Some(r) => return Some(FrameMeaning::Allocations(r)),
+                    None => return None
+                }
+            }
+        }
+    }
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for Frame<'b,V> {
+    type Meaning = FrameMeaning<'b,V>;
+    fn meaning(&self,n: usize) -> Self::Meaning {
+        let sz1 = self.previous.num_elem();
+        if n < sz1 {
+            return FrameMeaning::Previous(self.previous.meaning(n))
+        }
+        FrameMeaning::Allocations(self.allocations.meaning(n-sz1))
+    }
+    fn fmt_meaning<F : fmt::Write>(&self,m: &Self::Meaning,fmt: &mut F) -> Result<(),fmt::Error> {
+        match m {
+            &FrameMeaning::Previous(ref nm) => {
+                write!(fmt,"prev.")?;
+                self.previous.fmt_meaning(nm,fmt)
+            },
+            &FrameMeaning::Allocations(ref nm) => {
+                write!(fmt,"alloc.")?;
+                self.allocations.fmt_meaning(nm,fmt)
+            }
+        }
+    }
+}
+
+impl<'a,'b : 'a,V : 'a+Semantics<'a>+Bytes+FromConst<'b>> Semantics<'a> for Frame<'b,V> {
+    type Meanings = FrameMeanings<'a,'b,V>;
+    fn meanings(&'a self) -> Self::Meanings {
+        FrameMeanings::Previous(self.previous.meanings(),&self.allocations)
+    }
+}
+
+pub enum CallFrameMeaning<'b,V : Semantic> {
+    Values(<Assoc<&'b String,V> as Semantic>::Meaning),
+    Arguments(<Vec<V> as Semantic>::Meaning),
+    Activation(<Activation<'b> as Semantic>::Meaning),
+    Phi(<Choice<Data<&'b String>> as Semantic>::Meaning)
+}
+
+impl<'b,V : Semantic> PartialEq for CallFrameMeaning<'b,V> {
+    fn eq(&self,other: &CallFrameMeaning<'b,V>) -> bool {
+        match self {
+            &CallFrameMeaning::Values(ref p) => match other {
+                &CallFrameMeaning::Values(ref q) => p.eq(q),
+                _ => false
+            },
+            &CallFrameMeaning::Arguments(ref p) => match other {
+                &CallFrameMeaning::Arguments(ref q) => p.eq(q),
+                _ => false
+            },
+            &CallFrameMeaning::Activation(ref p) => match other {
+                &CallFrameMeaning::Activation(ref q) => p.eq(q),
+                _ => false
+            },
+            &CallFrameMeaning::Phi(ref p) => match other {
+                &CallFrameMeaning::Phi(ref q) => p.eq(q),
+                _ => false
+            },
+        }
+    }
+}
+
+impl<'b,V : Semantic> Eq for CallFrameMeaning<'b,V> {}
+
+impl<'b,V : Semantic> PartialOrd for CallFrameMeaning<'b,V> {
+    fn partial_cmp(&self,other: &CallFrameMeaning<'b,V>) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'b,V : Semantic> Ord for CallFrameMeaning<'b,V> {
+    fn cmp(&self,other: &CallFrameMeaning<'b,V>) -> Ordering {
+        match (self,other) {
+            (&CallFrameMeaning::Values(ref p),
+             &CallFrameMeaning::Values(ref q)) => p.cmp(q),
+            (&CallFrameMeaning::Values(_),_) => Ordering::Less,
+            (_,&CallFrameMeaning::Values(_)) => Ordering::Greater,
+            (&CallFrameMeaning::Arguments(ref p),
+             &CallFrameMeaning::Arguments(ref q)) => p.cmp(q),
+            (&CallFrameMeaning::Arguments(_),_) => Ordering::Less,
+            (_,&CallFrameMeaning::Arguments(_)) => Ordering::Greater,
+            (&CallFrameMeaning::Activation(ref p),
+             &CallFrameMeaning::Activation(ref q)) => p.cmp(q),
+            (&CallFrameMeaning::Activation(_),_) => Ordering::Less,
+            (_,&CallFrameMeaning::Activation(_)) => Ordering::Greater,
+            (&CallFrameMeaning::Phi(ref p),
+             &CallFrameMeaning::Phi(ref q)) => p.cmp(q)
+        }
+    }
+}
+
+impl<'b,V : Semantic> Hash for CallFrameMeaning<'b,V> {
+    fn hash<H>(&self, state: &mut H) where H: Hasher {
+        match self {
+            &CallFrameMeaning::Values(ref p) => {
+                (0 as u8).hash(state);
+                p.hash(state);
+            },
+            &CallFrameMeaning::Arguments(ref p) => {
+                (1 as u8).hash(state);
+                p.hash(state);
+            },
+            &CallFrameMeaning::Activation(ref p) => {
+                (2 as u8).hash(state);
+                p.hash(state);
+            },
+            &CallFrameMeaning::Phi(ref p) => {
+                (3 as u8).hash(state);
+                p.hash(state);
+            }
+        }
+    }
+}
+
+impl<'b,V : Semantic> fmt::Debug for CallFrameMeaning<'b,V> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        match self {
+            &CallFrameMeaning::Values(ref p) => f.debug_tuple("Values")
+                .field(p).finish(),
+            &CallFrameMeaning::Arguments(ref p) => f.debug_tuple("Arguments")
+                .field(p).finish(),
+            &CallFrameMeaning::Activation(ref p) => f.debug_tuple("Activation")
+                .field(p).finish(),
+            &CallFrameMeaning::Phi(ref p) => f.debug_tuple("Phi")
+                .field(p).finish()
+        }
+    }
+}
+
+pub enum CallFrameMeanings<'a,'b : 'a,V : 'a+Semantics<'a>> {
+    Values(<Assoc<&'b String,V> as Semantics<'a>>::Meanings,&'a CallFrame<'b,V>),
+    Arguments(<Vec<V> as Semantics<'a>>::Meanings,&'a CallFrame<'b,V>),
+    Activation(<Activation<'b> as Semantics<'a>>::Meanings,&'a CallFrame<'b,V>),
+    Phi(<Phi<'b> as Semantics<'a>>::Meanings)
+}
+
+impl<'b,V : Semantic> CallFrameMeaning<'b,V> {
+    pub fn is_pc(&self) -> bool {
+        match self {
+            &CallFrameMeaning::Activation(_) => true,
+            &CallFrameMeaning::Phi(_) => true,
+            _ => false
+        }
+    }
+}
+
+impl<'a,'b : 'a,V : 'a+Semantics<'a>> Iterator for CallFrameMeanings<'a,'b,V> {
+    type Item = CallFrameMeaning<'b,V>;
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            *self = match self {
+                &mut CallFrameMeanings::Values(ref mut it,cf) => match it.next() {
+                    Some(r) => return Some(CallFrameMeaning::Values(r)),
+                    None => CallFrameMeanings::Arguments(cf.arguments.meanings(),cf)
+                },
+                &mut CallFrameMeanings::Arguments(ref mut it,cf) => match it.next() {
+                    Some(r) => return Some(CallFrameMeaning::Arguments(r)),
+                    None => CallFrameMeanings::Activation(cf.activation.meanings(),cf)
+                },
+                &mut CallFrameMeanings::Activation(ref mut it,cf) => match it.next() {
+                    Some(r) => return Some(CallFrameMeaning::Activation(r)),
+                    None => CallFrameMeanings::Phi(cf.phi.meanings())
+                },
+                &mut CallFrameMeanings::Phi(ref mut it) => match it.next() {
+                    Some(r) => return Some(CallFrameMeaning::Phi(r)),
+                    None => return None
+                }
+            }
+        }
+    }
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for CallFrame<'b,V> {
+    type Meaning = CallFrameMeaning<'b,V>;
+    fn meaning(&self,pos: usize) -> Self::Meaning {
+        let off1 = self.values.num_elem();
+        if pos < off1 {
+            return CallFrameMeaning::Values(self.values.meaning(pos))
+        }
+        let off2 = off1+self.arguments.num_elem();
+        if pos < off2 {
+            return CallFrameMeaning::Arguments(self.arguments.meaning(pos-off1))
+        }
+        let off3 = off2+self.activation.num_elem();
+        if pos < off3 {
+            return CallFrameMeaning::Activation(self.activation.meaning(pos-off2))
+        }
+        CallFrameMeaning::Phi(self.phi.meaning(pos-off3))
+    }
+    fn fmt_meaning<F : fmt::Write>(&self,m: &Self::Meaning,fmt: &mut F) -> Result<(),fmt::Error> {
+        match m {
+            &CallFrameMeaning::Values(ref nm) => {
+                write!(fmt,"values.")?;
+                self.values.fmt_meaning(nm,fmt)
+            },
+            &CallFrameMeaning::Arguments(ref nm) => {
+                write!(fmt,"args.")?;
+                self.arguments.fmt_meaning(nm,fmt)
+            },
+            &CallFrameMeaning::Activation(ref nm) => {
+                write!(fmt,"act.")?;
+                self.activation.fmt_meaning(nm,fmt)
+            },
+            &CallFrameMeaning::Phi(ref nm) => {
+                write!(fmt,"phi.")?;
+                self.phi.fmt_meaning(nm,fmt)
+            }
+        }
+    }
+}
+
+impl<'a,'b : 'a,V : 'a+Semantics<'a>+Bytes+FromConst<'b>> Semantics<'a> for CallFrame<'b,V> {
+    type Meanings = CallFrameMeanings<'a,'b,V>;
+    fn meanings(&'a self) -> Self::Meanings {
+        CallFrameMeanings::Values(self.values.meanings(),self)
     }
 }

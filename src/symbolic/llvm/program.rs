@@ -7,11 +7,15 @@ use super::mem::{Bytes,FromConst,MemSlice};
 use super::{InstructionRef};
 use super::thread::*;
 use super::frame::*;
-use super::pointer::{PointerTrg};
+use super::pointer::{PointerTrg,Offset};
 use super::error::{Error,Errors,add_error};
 use std::marker::PhantomData;
-use num_bigint::BigInt;
+use num_bigint::{BigInt,BigUint};
 use std::ops::Range;
+use std::cmp::Ordering;
+use std::hash::{Hash,Hasher};
+use std::fmt;
+use std::fmt::Debug;
 
 pub const STEP_BW: usize = 32;
 
@@ -31,9 +35,10 @@ pub type Nondet<'a,V> = Assoc<InstructionRef<'a>,V>;
 
 #[derive(PartialEq,Eq,Hash,Clone,Debug)]
 pub struct Program<'a,V> {
-    threads: Threads<'a,V>,
-    global: Globals<'a,V>,
-    heap: Heap<'a,V>
+    pub threads: Threads<'a,V>,
+    pub global: Globals<'a,V>,
+    pub heap: Heap<'a,V>,
+    pub aux: Vec<Vec<u8>>
 }
 
 #[derive(PartialEq,Eq,Hash,Clone,Debug)]
@@ -114,7 +119,8 @@ impl<'a,V : Bytes+FromConst<'a>> Program<'a,V> {
     pub fn new() -> Self {
         Program { threads: Assoc::new(),
                   global: Assoc::new(),
-                  heap: Assoc::new() }
+                  heap: Assoc::new(),
+                  aux: Vec::new() }
     }
     pub fn is_single_threaded(&self) -> bool {
         match self.threads.is_single() {
@@ -259,7 +265,9 @@ pub fn program_get_ptr_trg<'a,'b,V,Em>(trg: OptRef<'a,PointerTrg<'b>>,
                     }
                 }
             }
-        }
+        },
+        &PointerTrg::Aux(_) => unimplemented!(),
+        &PointerTrg::AuxArray => unimplemented!()
     }
 }
 
@@ -310,7 +318,8 @@ pub fn program<'a,'b,'c,V,Em>(thrs: OptRef<'a,Threads<'b,V>>,
                               glob: OptRef<'a,Globals<'b,V>>,
                               inp_glob: Transf<Em>,
                               heap: OptRef<'a,Heap<'b,V>>,
-                              inp_heap: Transf<Em>)
+                              inp_heap: Transf<Em>,
+                              aux: OptRef<'a,Vec<Vec<u8>>>)
                               -> (OptRef<'c,Program<'b,V>>,Transf<Em>)
     where V : Bytes+FromConst<'b>+Clone,Em : Embed {
     debug_assert_eq!(thrs.as_ref().num_elem(),inp_thrs.size());
@@ -319,7 +328,8 @@ pub fn program<'a,'b,'c,V,Em>(thrs: OptRef<'a,Threads<'b,V>>,
 
     let prog = Program { threads: thrs.as_obj(),
                          global: glob.as_obj(),
-                         heap: heap.as_obj() };
+                         heap: heap.as_obj(),
+                         aux: aux.as_obj() };
     let prog_inp = Transformation::concat(&[inp_thrs,inp_glob,inp_heap]);
     (OptRef::Owned(prog),prog_inp)
 }
@@ -346,17 +356,20 @@ pub fn decompose_program<'a,'b,V,Em>(prog: OptRef<'a,Program<'b,V>>,
                                          OptRef<'a,Globals<'b,V>>,
                                          Transf<Em>,
                                          OptRef<'a,Heap<'b,V>>,
-                                         Transf<Em>)
+                                         Transf<Em>,
+                                         OptRef<'a,Vec<Vec<u8>>>)
     where V : Bytes+FromConst<'b>+Clone,Em : Embed {
-    let (thrs,glob,hp) = match prog {
+    let (thrs,glob,hp,aux) = match prog {
         OptRef::Ref(ref prog)
             => (OptRef::Ref(&prog.threads),
                 OptRef::Ref(&prog.global),
-                OptRef::Ref(&prog.heap)),
+                OptRef::Ref(&prog.heap),
+                OptRef::Ref(&prog.aux)),
         OptRef::Owned(prog)
             => (OptRef::Owned(prog.threads),
                 OptRef::Owned(prog.global),
-                OptRef::Owned(prog.heap))
+                OptRef::Owned(prog.heap),
+                OptRef::Owned(prog.aux))
     };
     let sz_thrs = thrs.as_ref().num_elem();
     let sz_glob = glob.as_ref().num_elem();
@@ -364,7 +377,7 @@ pub fn decompose_program<'a,'b,V,Em>(prog: OptRef<'a,Program<'b,V>>,
     let inp_thrs = Transformation::view(0,sz_thrs,inp_prog.clone());
     let inp_glob = Transformation::view(sz_thrs,sz_glob,inp_prog.clone());
     let inp_hp = Transformation::view(sz_thrs+sz_glob,sz_hp,inp_prog);
-    (thrs,inp_thrs,glob,inp_glob,hp,inp_hp)
+    (thrs,inp_thrs,glob,inp_glob,hp,inp_hp,aux)
 }
 
 fn decompose_program_input<'a,'b,V>(x: OptRef<'a,ProgramInput<'b,V>>)
@@ -407,9 +420,13 @@ impl<'b,V : Bytes+FromConst<'b>+Clone> Composite for Program<'b,V> {
               FComb : Fn(Transf<Em>,Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
               FL : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
               FR : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error> {
-        let (thr_x,inp_thr_x,glb_x,inp_glb_x,hp_x,inp_hp_x) = decompose_program(x,inp_x);
-        let (thr_y,inp_thr_y,glb_y,inp_glb_y,hp_y,inp_hp_y) = decompose_program(y,inp_y);
+        let (thr_x,inp_thr_x,glb_x,inp_glb_x,hp_x,inp_hp_x,aux_x) = decompose_program(x,inp_x);
+        let (thr_y,inp_thr_y,glb_y,inp_glb_y,hp_y,inp_hp_y,aux_y) = decompose_program(y,inp_y);
 
+        if aux_x.as_ref()!=aux_y.as_ref() {
+            return Ok(None)
+        }
+        
         let (thr,inp_thr) = match Assoc::combine(thr_x,thr_y,
                                                  inp_thr_x,inp_thr_y,
                                                  comb,only_l,only_r,em)? {
@@ -433,7 +450,8 @@ impl<'b,V : Bytes+FromConst<'b>+Clone> Composite for Program<'b,V> {
 
         Ok(Some((OptRef::Owned(Program { threads: thr.as_obj(),
                                          global: glb.as_obj(),
-                                         heap: hp.as_obj() }),
+                                         heap: hp.as_obj(),
+                                         aux: aux_x.as_obj() }),
                  Transformation::concat(&[inp_thr,inp_glb,inp_hp]))))
     }
 }
@@ -638,7 +656,7 @@ pub type ThreadView<'a,V> = Then<ThreadsView<'a,V>,
 pub fn thread_view_to_idx<'a,V,Em : Embed>(view: &ThreadView<'a,V>,bw: usize,em: &mut Em)
                                            -> Result<(ThreadId<'a>,Transf<Em>),Em::Error> {
     let &Then(_,Then(ref assoc,ref vec)) = view;
-    let e = em.const_bitvec(bw,BigInt::from(vec.idx))?;
+    let e = em.const_bitvec(bw,BigUint::from(vec.idx))?;
     let inp = Transformation::constant(vec![e]);
     Ok((assoc.key.clone(),inp))
 }
@@ -907,7 +925,7 @@ pub enum PointerView<'a,V : 'a> {
                               Then<AllocationsView<'a,V>,
                                    Then<AssocView<InstructionRef<'a>,
                                                   Vec<MemSlice<'a,V>>>,
-                                        VecView<MemSlice<'a,V>>>>>>>>)
+                                        VecView<MemSlice<'a,V>>>>>>>>),
 }
 
 impl<'a,V> View for PointerView<'a,V>
@@ -935,5 +953,561 @@ impl<'a,V> View for PointerView<'a,V>
             &PointerView::Stack(ref view)
                 => view.get_el_ext(obj)
         }
+    }
+}
+
+impl<'a,V> ViewMut for PointerView<'a,V>
+    where V : 'a+Bytes+FromConst<'a> {
+    fn get_el_mut<'b>(&self, obj: &'b mut Self::Viewed) -> &'b mut Self::Element
+        where Self : 'b {
+        match self {
+            &PointerView::Global(ref view)
+                => view.get_el_mut(obj),
+            &PointerView::Heap(ref view)
+                => view.get_el_mut(obj),
+            &PointerView::Stack(ref view)
+                => view.get_el_mut(obj)
+        }
+    }
+    fn get_el_mut_ext<'b>(&self,obj: &'b mut Self::Viewed)
+                          -> (usize, &'b mut Self::Element)
+        where
+        Self : 'b {
+        match self {
+            &PointerView::Global(ref view)
+                => view.get_el_mut_ext(obj),
+            &PointerView::Heap(ref view)
+                => view.get_el_mut_ext(obj),
+            &PointerView::Stack(ref view)
+                => view.get_el_mut_ext(obj)
+        }
+    }
+}
+
+pub enum ProgramMeaning<'b,V : Semantic+Bytes+FromConst<'b>> {
+    Threads(<Threads<'b,V> as Semantic>::Meaning),
+    Global(<Globals<'b,V> as Semantic>::Meaning),
+    Heap(<Heap<'b,V> as Semantic>::Meaning)
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> PartialEq for ProgramMeaning<'b,V> {
+    fn eq(&self,other: &ProgramMeaning<'b,V>) -> bool {
+        match self {
+            &ProgramMeaning::Threads(ref p) => match other {
+                &ProgramMeaning::Threads(ref q) => p.eq(q),
+                _ => false
+            },
+            &ProgramMeaning::Global(ref p) => match other {
+                &ProgramMeaning::Global(ref q) => p.eq(q),
+                _ => false
+            },
+            &ProgramMeaning::Heap(ref p) => match other {
+                &ProgramMeaning::Heap(ref q) => p.eq(q),
+                _ => false
+            }
+        }
+    }
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> Eq for ProgramMeaning<'b,V> {}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> PartialOrd for ProgramMeaning<'b,V> {
+    fn partial_cmp(&self,other: &ProgramMeaning<'b,V>) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> Ord for ProgramMeaning<'b,V> {
+    fn cmp(&self,other: &ProgramMeaning<'b,V>) -> Ordering {
+        match (self,other) {
+            (&ProgramMeaning::Threads(ref p),
+             &ProgramMeaning::Threads(ref q)) => p.cmp(q),
+            (&ProgramMeaning::Threads(_),_) => Ordering::Less,
+            (_,&ProgramMeaning::Threads(_)) => Ordering::Greater,
+            (&ProgramMeaning::Global(ref p),
+             &ProgramMeaning::Global(ref q)) => p.cmp(q),
+            (&ProgramMeaning::Global(_),_) => Ordering::Less,
+            (_,&ProgramMeaning::Global(_)) => Ordering::Greater,
+            (&ProgramMeaning::Heap(ref p),
+             &ProgramMeaning::Heap(ref q)) => p.cmp(q)
+        }
+    }
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> Hash for ProgramMeaning<'b,V> {
+    fn hash<H>(&self, state: &mut H) where H: Hasher {
+        match self {
+            &ProgramMeaning::Threads(ref p) => {
+                (0 as u8).hash(state);
+                p.hash(state);
+            },
+            &ProgramMeaning::Global(ref p) => {
+                (1 as u8).hash(state);
+                p.hash(state);
+            },
+            &ProgramMeaning::Heap(ref p) => {
+                (2 as u8).hash(state);
+                p.hash(state);
+            }
+        }
+    }
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> fmt::Debug for ProgramMeaning<'b,V> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        match self {
+            &ProgramMeaning::Threads(ref p) => f.debug_tuple("Threads")
+                .field(p).finish(),
+            &ProgramMeaning::Global(ref p) => f.debug_tuple("Global")
+                .field(p).finish(),
+            &ProgramMeaning::Heap(ref p) => f.debug_tuple("Heap")
+                .field(p).finish(),
+        }
+    }
+}
+
+
+pub enum ProgramMeanings<'a,'b : 'a,V : 'a+Semantics<'a>+Bytes+FromConst<'b>> {
+    Threads(<Threads<'b,V> as Semantics<'a>>::Meanings,&'a Program<'b,V>),
+    Global(<Globals<'b,V> as Semantics<'a>>::Meanings,&'a Program<'b,V>),
+    Heap(<Heap<'b,V> as Semantics<'a>>::Meanings)
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> ProgramMeaning<'b,V> {
+    pub fn is_pc(&self) -> bool {
+        match self {
+            &ProgramMeaning::Threads(ref m) => m.meaning.meaning.is_pc(),
+            _ => false
+        }
+    }
+}
+
+impl<'a,'b : 'a,V : 'a+Semantics<'a>+Bytes+FromConst<'b>> Iterator for ProgramMeanings<'a,'b,V> {
+    type Item = ProgramMeaning<'b,V>;
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            *self = match self {
+                &mut ProgramMeanings::Threads(ref mut it,prog) => match it.next() {
+                    Some(r) => return Some(ProgramMeaning::Threads(r)),
+                    None => ProgramMeanings::Global(prog.global.meanings(),prog)
+                },
+                &mut ProgramMeanings::Global(ref mut it,prog) => match it.next() {
+                    Some(r) => return Some(ProgramMeaning::Global(r)),
+                    None => ProgramMeanings::Heap(prog.heap.meanings())
+                },
+                &mut ProgramMeanings::Heap(ref mut it) => match it.next() {
+                    Some(r) => return Some(ProgramMeaning::Heap(r)),
+                    None => return None
+                }
+            }
+        }
+    }
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for Program<'b,V> {
+    type Meaning = ProgramMeaning<'b,V>;
+    fn meaning(&self,pos: usize) -> Self::Meaning {
+        let off1 = self.threads.num_elem();
+        if pos<off1 {
+            return ProgramMeaning::Threads(self.threads.meaning(pos))
+        }
+        let off2 = off1+self.global.num_elem();
+        if pos<off2 {
+            return ProgramMeaning::Global(self.global.meaning(pos-off1))
+        }
+        ProgramMeaning::Heap(self.heap.meaning(pos-off1))
+    }
+    fn fmt_meaning<F : fmt::Write>(&self,m: &Self::Meaning,fmt: &mut F) -> Result<(),fmt::Error> {
+        match m {
+            &ProgramMeaning::Threads(ref nm) => {
+                write!(fmt,"threads.")?;
+                self.threads.fmt_meaning(nm,fmt)
+            },
+            &ProgramMeaning::Global(ref nm) => {
+                write!(fmt,"global.")?;
+                self.global.fmt_meaning(nm,fmt)
+            },
+            &ProgramMeaning::Heap(ref nm) => {
+                write!(fmt,"heap.")?;
+                self.heap.fmt_meaning(nm,fmt)
+            }
+        }
+    }
+}
+
+impl<'a,'b : 'a,V : 'a+Semantics<'a>+Bytes+FromConst<'b>> Semantics<'a> for Program<'b,V> {
+    type Meanings = ProgramMeanings<'a,'b,V>;
+    fn meanings(&'a self) -> Self::Meanings {
+        ProgramMeanings::Threads(self.threads.meanings(),self)
+    }
+}
+
+pub enum MemLookup<'a,V : 'a> {
+    Slice(PointerView<'a,V>),
+    Aux(usize),
+    AuxArray
+}
+
+pub enum MemLookups<'a : 'b,'b,V : 'a,Em : DeriveValues>
+    where Em::Expr : 'b {
+    Global(Option<&'a String>,PhantomData<V>),
+    Heap(InstructionRef<'a>,IndexedIter<Em>),
+    StackStart(&'b Program<'a,V>,
+               ThreadId<'a>,Transf<Em>,
+               FrameId<'a>,Transf<Em>,
+               InstructionRef<'a>,Transf<Em>,
+               &'b [Em::Expr]),
+    Stack(StackLookups<'a,'b,V,Em>)
+}
+
+pub struct StackLookups<'a : 'b,'b,V : 'a,Em : DeriveValues>
+    where Em::Expr : 'b {
+    program: &'b Program<'a,V>,
+    thread_id: ThreadId<'a>,
+    thread_iter: IndexedIter<Em>,
+    thread_last: usize,
+    thread_pos: usize,
+    frame_id: FrameId<'a>,
+    frame_index: Transf<Em>,
+    frame_iter: IndexedIter<Em>,
+    frame_last: usize,
+    frame_pos: usize,
+    instr_id: InstructionRef<'a>,
+    instr_index: Transf<Em>,
+    instr_iter: IndexedIter<Em>,
+    exprs: &'b [Em::Expr]
+}
+
+impl<'a : 'b,'b,V : 'a+Bytes+FromConst<'a>+Debug,Em : DeriveValues> StackLookups<'a,'b,V,Em>
+    where Em::Expr : 'b {
+    fn new(program: &'b Program<'a,V>,
+           thread_id: ThreadId<'a>,
+           thread_index: Transf<Em>,
+           frame_id: FrameId<'a>,
+           frame_index: Transf<Em>,
+           instr_id: InstructionRef<'a>,
+           instr_index: Transf<Em>,
+           exprs: &'b [Em::Expr],
+           conds: &mut Vec<Transf<Em>>,
+           pos: usize,
+           em: &mut Em) -> Result<Option<Self>,Em::Error> {
+        let view = ThreadsView::new()
+            .then(AssocView::new(thread_id));
+        let pool = view.get_el(program);
+        /*{ // Debugging
+            let frame_idx_ = frame_index.get(exprs,0,em)?;
+            println!("ACCESS DYN {:?}, {:?}",pool,match em.derive_values(&frame_idx_)? {
+                None => vec![],
+                Some(it) => it.collect::<Vec<_>>()
+            });
+        }*/
+        let mut thread_iter = access_dyn(pool,thread_index,exprs,em)?;
+        while let Some(thread_last) = thread_iter.next(conds,pos,em)? {
+            let thread_pos = conds.len();
+            let mut frame_iter = Self::get_frame_iter(program,
+                                                      thread_id.clone(),
+                                                      thread_last,
+                                                      frame_id.clone(),
+                                                      frame_index.clone(),
+                                                      exprs,em)?;
+            while let Some(frame_last) = frame_iter.next(conds,thread_pos,em)? {
+                let frame_pos = conds.len();
+                let instr_iter = Self::get_instr_iter(program,
+                                                      thread_id.clone(),
+                                                      thread_last,
+                                                      frame_id.clone(),
+                                                      frame_last,
+                                                      instr_id.clone(),
+                                                      instr_index.clone(),
+                                                      exprs,em)?;
+                return Ok(Some(StackLookups { program: program,
+                                              thread_id: thread_id,
+                                              thread_iter: thread_iter,
+                                              thread_last: thread_last,
+                                              thread_pos: thread_pos,
+                                              frame_id: frame_id,
+                                              frame_index: frame_index,
+                                              frame_iter: frame_iter,
+                                              frame_last: frame_last,
+                                              frame_pos: frame_pos,
+                                              instr_id: instr_id,
+                                              instr_index: instr_index,
+                                              instr_iter: instr_iter,
+                                              exprs: exprs }))
+            }
+        }
+        Ok(None)
+    }
+    fn frame_view(frame_id: FrameId<'a>,
+                  frame_last: usize) -> FrameView<'a,V> {
+        match frame_id {
+            FrameId::Call(cid) => FrameView::Call(
+                CallStackView::new()
+                    .then(AssocView::new(cid)
+                          .then(BitVecVectorStackView::new(frame_last)
+                                .then(SndView::new())))),
+            FrameId::Stack(i) => FrameView::Stack(
+                StackView::new()
+                    .then(AssocView::new(i)
+                          .then(BitVecVectorStackView::new(frame_last))))
+        }
+    }
+    fn get_frame_iter(program: &Program<'a,V>,
+                      thread_id: ThreadId<'a>,
+                      thread_last: usize,
+                      frame_id: FrameId<'a>,
+                      frame_index: Transf<Em>,
+                      exprs: &[Em::Expr],
+                      em: &mut Em) -> Result<IndexedIter<Em>,Em::Error> {
+        match frame_id {
+            FrameId::Call(cid) => {
+                let view = ThreadsView::new()
+                    .then(AssocView::new(thread_id)
+                          .then(VecView::new(thread_last)
+                                .then(CallStackView::new()
+                                      .then(AssocView::new(cid)))));
+                let frs = view.get_el(program);
+                Ok(frs.access(frame_index,exprs,em)?.iter)
+            },
+            FrameId::Stack(i) => {
+                let view = ThreadsView::new()
+                    .then(AssocView::new(thread_id)
+                          .then(VecView::new(thread_last)
+                                .then(StackView::new()
+                                      .then(AssocView::new(i)))));
+                let frs = view.get_el(program);
+                Ok(frs.access(frame_index,exprs,em)?.iter)
+            }
+        }
+    }
+    fn get_instr_iter(program: &Program<'a,V>,
+                      thread_id: ThreadId<'a>,
+                      thread_last: usize,
+                      frame_id: FrameId<'a>,
+                      frame_last: usize,
+                      instr_id: InstructionRef<'a>,
+                      instr_index: Transf<Em>,
+                      exprs: &[Em::Expr],
+                      em: &mut Em) -> Result<IndexedIter<Em>,Em::Error> {
+        let fr_view = Self::frame_view(frame_id,frame_last);
+        let view = ThreadsView::new()
+            .then(AssocView::new(thread_id)
+                  .then(VecView::new(thread_last)
+                        .then(fr_view
+                              .then(AllocationsView::new()
+                                    .then(AssocView::new(instr_id))))));
+        let pool = view.get_el(program);
+        access_dyn(pool,instr_index,exprs,em)
+    }
+    fn next_instr(&mut self,conds: &mut Vec<Transf<Em>>,em: &mut Em) -> Result<Option<usize>,Em::Error> {
+        self.instr_iter.next(conds,self.frame_pos,em)
+    }
+    fn mk_view(&self,instr_last: usize) -> PointerView<'a,V> {
+        let fr_view = match self.frame_id {
+            FrameId::Call(ref cid) => FrameView::Call(
+                CallStackView::new()
+                    .then(AssocView::new(cid.clone())
+                          .then(BitVecVectorStackView::new(self.frame_last)
+                                .then(SndView::new())))),
+            FrameId::Stack(ref i) => FrameView::Stack(
+                StackView::new()
+                    .then(AssocView::new(i.clone())
+                          .then(BitVecVectorStackView::new(self.frame_last))))
+        };
+        PointerView::Stack(ThreadsView::new()
+                           .then(AssocView::new(self.thread_id.clone())
+                                 .then(VecView::new(self.thread_last)
+                                       .then(fr_view
+                                             .then(AllocationsView::new()
+                                                   .then(AssocView::new(self.instr_id.clone())
+                                                         .then(VecView::new(instr_last))))))))
+    }
+}
+
+impl<'a : 'b,'b,V : 'a+Bytes+FromConst<'a>+Debug,Em : DeriveValues> CondIterator<Em> for StackLookups<'a,'b,V,Em> {
+    type Item = PointerView<'a,V>;
+    fn next(&mut self,conds: &mut Vec<Transf<Em>>,pos: usize,em: &mut Em) -> Result<Option<Self::Item>,Em::Error> {
+        match self.instr_iter.next(conds,self.frame_pos,em)? {
+            Some(instr_last) => Ok(Some(self.mk_view(instr_last))),
+            None => {
+                while let Some(frame_last) = self.frame_iter.next(conds,self.thread_pos,em)? {
+                    let frame_pos = conds.len();
+                    let mut instr_iter = Self::get_instr_iter(self.program,
+                                                              self.thread_id.clone(),
+                                                              self.thread_last,
+                                                              self.frame_id.clone(),
+                                                              frame_last,
+                                                              self.instr_id.clone(),
+                                                              self.instr_index.clone(),
+                                                              self.exprs,em)?;
+                    if let Some(instr_last) = instr_iter.next(conds,frame_pos,em)? {
+                        self.frame_last = frame_last;
+                        self.frame_pos = frame_pos;
+                        self.instr_iter = instr_iter;
+                        return Ok(Some(self.mk_view(instr_last)))
+                    }
+                }
+                while let Some(thread_last) = self.thread_iter.next(conds,pos,em)? {
+                    let thread_pos = conds.len();
+                    let mut frame_iter = Self::get_frame_iter(self.program,
+                                                              self.thread_id.clone(),
+                                                              self.thread_last,
+                                                              self.frame_id.clone(),
+                                                              self.frame_index.clone(),
+                                                              self.exprs,em)?;
+                    while let Some(frame_last) = frame_iter.next(conds,thread_pos,em)? {
+                        let frame_pos = conds.len();
+                        let mut instr_iter = Self::get_instr_iter(self.program,
+                                                                  self.thread_id.clone(),
+                                                                  thread_last,
+                                                                  self.frame_id.clone(),
+                                                                  frame_last,
+                                                                  self.instr_id.clone(),
+                                                                  self.instr_index.clone(),
+                                                                  self.exprs,em)?;
+                        if let Some(instr_last) = instr_iter.next(conds,frame_pos,em)? {
+                            self.thread_last = thread_last;
+                            self.thread_pos = thread_pos;
+                            self.frame_iter = frame_iter;
+                            self.frame_last = frame_last;
+                            self.frame_pos = frame_pos;
+                            self.instr_iter = instr_iter;
+                            return Ok(Some(self.mk_view(instr_last)))
+                        }
+                    }
+                }
+                Ok(None)
+            }
+        }
+    }
+}
+
+impl<'a,V : Bytes+FromConst<'a>+Debug> MemLookup<'a,V> {
+    pub fn load<'b,Em : Embed>(
+        &self,
+        off: &'b Offset,
+        off_inp: Transf<Em>,
+        len: usize,
+        prog: &'b Program<'a,V>,
+        prog_inp: Transf<Em>,
+        em: &mut Em)
+        -> Result<(OptRef<'b,V>,Transf<Em>),Em::Error> {
+        match self {
+            &MemLookup::Slice(ref v) => {
+                let (sl,sl_inp) = v.get_with_inp(prog,prog_inp);
+                match MemSlice::read(OptRef::Ref(sl),sl_inp,
+                                     OptRef::Ref(off),off_inp,
+                                     len,em)? {
+                    None => panic!("Reading {} bytes from {:?} with offset {:?} failed.",len,sl,off),
+                    Some(res) => Ok(res)
+                }
+            },
+            _ => unimplemented!()
+        }
+    }
+    pub fn store<Em : Embed>(
+        &self,
+        off: &Offset,
+        off_inp: Transf<Em>,
+        val: &V,
+        val_inp: Transf<Em>,
+        prog: &mut Program<'a,V>,
+        upd: &mut Updates<Em>,
+        orig: Transf<Em>,
+        em: &mut Em) -> Result<(),Em::Error> {
+        match self {
+            &MemLookup::Slice(ref v) => {
+                let (coff,sl) = v.get_el_mut_ext(prog);
+                let sl_sz = sl.num_elem();
+                let sl_inp = read_updates(coff,sl.num_elem(),upd,orig);
+                let ninp = sl.write(sl_inp,OptRef::Ref(off),off_inp,
+                                    OptRef::Ref(val),val_inp,em)?.unwrap();
+                insert_updates(upd,coff,sl_sz,ninp);
+                Ok(())
+            },
+            _ => unimplemented!()
+        }
+    }
+}
+
+impl<'a,'b,V : Bytes+FromConst<'a>,Em : DeriveValues> MemLookups<'a,'b,V,Em> {
+    pub fn new(trg: &PointerTrg<'a>,
+               trg_inp: Transf<Em>,
+               prog: &'b Program<'a,V>,
+               exprs: &'b [Em::Expr],
+               em: &mut Em)
+               -> Result<Self,Em::Error> {
+        match trg {
+            &PointerTrg::Global(name)
+                => Ok(MemLookups::Global(Some(name),PhantomData)),
+            &PointerTrg::Heap(instr,bw) => {
+                let (_,pool) = prog.heap.access(&instr);
+                let it = access_dyn(pool,trg_inp,exprs,em)?;
+                Ok(MemLookups::Heap(instr,it))
+            },
+            &PointerTrg::Stack(thr,thr_bw,
+                               ref fr,fr_bw,
+                               instr,instr_bw) => {
+                let (_,thrs) = prog.threads.access(&thr);
+                let thr_idx   = Transformation::view(0,1,trg_inp.clone());
+                let fr_idx    = Transformation::view(1,1,trg_inp.clone());
+                let instr_idx = Transformation::view(2,1,trg_inp);
+                Ok(MemLookups::StackStart(prog,thr,thr_idx,fr.clone(),fr_idx,instr,instr_idx,exprs))
+            },
+            _ => panic!("MemLookups for {:?}",trg)
+        }
+    }
+}
+
+impl<'a,'b,Em : DeriveValues,V : Bytes+FromConst<'a>+Debug
+     > CondIterator<Em> for MemLookups<'a,'b,V,Em> {
+    type Item = MemLookup<'a,V>;
+    fn next(&mut self,conds: &mut Vec<Transf<Em>>,pos: usize,em: &mut Em)
+            -> Result<Option<Self::Item>, Em::Error> {
+        let (nself,ret) = match self {
+            &mut MemLookups::Global(ref mut name,_) => match name.take() {
+                None => return Ok(None),
+                Some(rname) => {
+                    let view = GlobalsView::new()
+                        .then(AssocView::new(rname));
+                    return Ok(Some(MemLookup::Slice(PointerView::Global(view))))
+                }
+            },
+            &mut MemLookups::Heap(instr,ref mut it)
+                => match it.next(conds,pos,em)? {
+                    None => return Ok(None),
+                    Some(idx) => {
+                        let view = HeapView::new()
+                            .then(AssocView::new(instr)
+                                  .then(VecView::new(idx)));
+                        let pview = PointerView::Heap(view);
+                        return Ok(Some(MemLookup::Slice(pview)))
+                    }
+                },
+            &mut MemLookups::StackStart(prog,ref thr,ref thr_idx,
+                                        ref fr,ref fr_idx,
+                                        ref instr,ref instr_idx,exprs) => {
+                match StackLookups::new(prog,thr.clone(),thr_idx.clone(),
+                                        fr.clone(),fr_idx.clone(),
+                                        instr.clone(),instr_idx.clone(),
+                                        exprs,conds,pos,em)? {
+                    None => {
+                        println!("Zero entries");
+                        return Ok(None)
+                    },
+                    Some(mut lookups) => match lookups.next(conds,pos,em)? {
+                        None => return Ok(None),
+                        Some(pview) => (MemLookups::Stack(lookups),
+                                        Some(MemLookup::Slice(pview)))
+                    }
+                }
+            },
+            &mut MemLookups::Stack(ref mut it) => match it.next(conds,pos,em)? {
+                None => return Ok(None),
+                Some(pview) => return Ok(Some(MemLookup::Slice(pview)))
+            }
+        };
+        *self = nself;
+        Ok(ret)
     }
 }

@@ -1,8 +1,7 @@
 extern crate smtrs;
 extern crate llvm_ir;
 
-use self::smtrs::composite::{Composite,OptRef,Transformation,Transf,
-                             vec_iter,index_as_value,ite};
+use self::smtrs::composite::*;
 use self::smtrs::embed::{Embed};
 use self::smtrs::expr;
 use std::cmp::{Ordering,max};
@@ -11,6 +10,8 @@ use self::llvm_ir::types::{Type as LLVMType};
 use std::collections::HashMap;
 use std::hash::{Hash,Hasher};
 use super::pointer::Offset;
+use std::fmt::Debug;
+use std::fmt;
 
 pub trait Bytes : Composite {
     fn byte_width(&self) -> usize;
@@ -28,7 +29,7 @@ pub trait Bytes : Composite {
     }
 }
 
-#[derive(PartialEq,Eq,Clone,Debug)]
+#[derive(PartialEq,Eq,Clone)]
 pub enum MemObj<'a,V> {
     FreshObj(usize),
     ConstObj(&'a DataLayout,
@@ -50,10 +51,33 @@ pub trait FromConst<'a> : Composite {
                               -> Result<Option<(Self,Transf<Em>)>,Em::Error>;
 }
 
-impl<'a,V : Bytes+FromConst<'a>+Clone> MemSlice<'a,V> {
+impl<'a,V : Debug> Debug for MemObj<'a,V> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        match *self {
+            MemObj::FreshObj(ref sz) => f.debug_tuple("FreshObj")
+                .field(sz).finish(),
+            MemObj::ConstObj(_,ref c,ref tp,_) => f.debug_tuple("MemObj")
+                .field(c).field(tp).finish(),
+            MemObj::ValueObj(ref v) => f.debug_tuple("ValueObj")
+                .field(v).finish()
+        }
+    }
+}
+
+impl<'a,V : Bytes+FromConst<'a>+Clone+Debug> MemSlice<'a,V> {
     pub fn alloca<Em : Embed>(sz: usize,_: &mut Em) -> (Self,Transf<Em>) {
         (MemSlice(vec![MemObj::FreshObj(sz)]),
          Transformation::id(0))
+    }
+    pub fn realloc(&mut self,sz: usize) {
+        let csz = self.byte_width();
+        if sz==csz {
+            return
+        }
+        if sz < csz {
+            panic!("Making slices smaller not yet supported")
+        }
+        self.0.push(MemObj::FreshObj(sz-csz))
     }
     pub fn is_free(&self) -> bool {
         false
@@ -72,6 +96,7 @@ impl<'a,V : Bytes+FromConst<'a>+Clone> MemSlice<'a,V> {
                               em: &mut Em)
                               -> Result<Option<(OptRef<'b,V>,Transf<Em>)>,Em::Error>
         where Em : Embed {
+        //println!("Reading at {} with len {} from {:#?}",off,len,sl.as_ref());
         let mut acc = 0;
         let vec = match sl {
             OptRef::Ref(ref rsl) => OptRef::Ref(&rsl.0),
@@ -86,19 +111,19 @@ impl<'a,V : Bytes+FromConst<'a>+Clone> MemSlice<'a,V> {
                 }
                 if off-acc+len<=bw {
                     return match MemObj::as_value(obj,obj_inp,em)? {
-                        None => Ok(None),
+                        None => panic!("Reading from uninitialized memory at {}, previous element {}",off,acc),//Ok(None),
                         Some((sobj,sobj_inp))
                             => V::extract_bytes(sobj,sobj_inp,off-acc,len,em)
                     }
                 }
                 let (start,inp_start) = {
                     match MemObj::as_value(obj,obj_inp,em)? {
-                        None => return Ok(None),
+                        None => panic!("Reading from uninitialized memory"),//return Ok(None),
                         Some((val0,val0_inp)) => if off==acc {
                             (val0,val0_inp)
                         } else {
                             match V::extract_bytes(val0,val0_inp,off-acc,bw+acc-off,em)? {
-                                None => return Ok(None),
+                                None => panic!("Failed to extract bytes"),//return Ok(None),
                                 Some(res) => res
                             }
                         }
@@ -111,29 +136,29 @@ impl<'a,V : Bytes+FromConst<'a>+Clone> MemSlice<'a,V> {
                 while let Some((obj,obj_inp)) = it.next() {
                     let bw = obj.as_ref().byte_width();
                     let (val,val_inp) = match MemObj::as_value(obj,obj_inp,em)? {
-                        None => return Ok(None),
+                        None => panic!("Reading from uninitialized memory"),//return Ok(None),
                         Some(res) => res
                     };
                     if rest<bw {
                         let (rval,rval_inp) = match V::extract_bytes(val,val_inp,0,rest,em)? {
-                            None => return Ok(None),
+                            None => panic!("Reading from uninitialized memory"),//return Ok(None),
                             Some(res) => res
                         };
                         return V::concat_bytes(cur,cur_inp,rval,rval_inp,em)
                     }
                     let (ncur,ncur_inp) = match V::concat_bytes(cur,cur_inp,val,val_inp,em)? {
-                        None => return Ok(None),
+                        None => panic!("Cannot concat bytes"),//return Ok(None),
                         Some(res) => res
                     };
                     cur = ncur;
                     cur_inp = ncur_inp;
                     acc+=bw;
                 }
-                return Ok(None)
+                return panic!("Overread")//Ok(None)
             }
             acc+=bw;
         }
-        Ok(None)
+        panic!("Overread") //Ok(None)
     }
     pub fn read<'b,Em : Embed>(sl: OptRef<'b,Self>,
                                inp_sl: Transf<Em>,
@@ -142,10 +167,11 @@ impl<'a,V : Bytes+FromConst<'a>+Clone> MemSlice<'a,V> {
                                len: usize,
                                em: &mut Em)
                                -> Result<Option<(OptRef<'b,V>,Transf<Em>)>,Em::Error> {
-        let (stat_off,mult) = (off.as_ref().0).0;
+        let (mult,stat_off) = (off.as_ref().0).0;
         match off.as_ref().1 {
             None => Self::read_static(sl,inp_sl,stat_off,len,em),
             Some(ref singleton) => {
+                panic!("No dynamic reading!");
                 let srt = singleton.0.kind();
                 let (val0,inp_val0) = match Self::read_static(sl.to_ref(),inp_sl.clone(),stat_off,len,em)? {
                     None => return Ok(None),
@@ -176,6 +202,91 @@ impl<'a,V : Bytes+FromConst<'a>+Clone> MemSlice<'a,V> {
             }
         }
     }
+    pub fn write_static<'b,Em : Embed>(&mut self,
+                                       inp_sl: Transf<Em>,
+                                       off: usize,
+                                       val: OptRef<'b,V>,
+                                       val_inp: Transf<Em>,
+                                       em: &mut Em)
+                                       -> Result<Option<Transf<Em>>,Em::Error> {
+        let val_sz = val.as_ref().byte_width();
+        let mut bw_acc = 0;
+        let mut acc = 0;
+        for i in 0..self.0.len() {
+            if bw_acc > off {
+                unimplemented!()
+            }
+            match self.0[i] {
+                MemObj::FreshObj(w) => {
+                    if bw_acc+w<=off {
+                        bw_acc+=w;
+                        continue
+                    }
+                    if bw_acc==off {
+                        self.0[i] = MemObj::ValueObj(val.as_obj());
+                        if val_sz != w {
+                            self.0.insert(i+1,MemObj::FreshObj(w-val_sz));
+                        }
+                    } else {
+                        self.0[i] = MemObj::FreshObj(off-bw_acc);
+                        self.0.insert(i+1,MemObj::ValueObj(val.as_obj()));
+                        if val_sz != w+bw_acc-off {
+                            self.0.insert(i+2,MemObj::FreshObj(w-val_sz+bw_acc-off));
+                        }
+                    }
+                    let before = Transformation::view(0,acc,inp_sl.clone());
+                    let after = Transformation::view(acc,
+                                                     inp_sl.size()-acc,
+                                                     inp_sl.clone());
+                    let res_inp = Transformation::concat(&[before,
+                                                           val_inp,
+                                                           after]);
+                    return Ok(Some(res_inp))
+                },
+                _ => {}
+            }
+            match self.0[i] {
+                MemObj::ValueObj(ref mut cval) => {
+                    let cval_bw = cval.byte_width();
+                    let cval_sz = cval.num_elem();
+                    if bw_acc+cval_bw<=off {
+                        bw_acc+=cval_bw;
+                        acc+=cval_sz;
+                        continue
+                    }
+                    if bw_acc==off && cval_bw==val_sz {
+                        *cval = val.as_obj();
+                        let before = Transformation::view(0,acc,inp_sl.clone());
+                        let after = Transformation::view(acc+cval_sz,
+                                                         inp_sl.size()-acc-cval_sz,
+                                                         inp_sl.clone());
+                        let res_inp = Transformation::concat(&[before,
+                                                               val_inp,
+                                                               after]);
+                        return Ok(Some(res_inp))
+                    }
+                    unimplemented!()
+                },
+                _ => unimplemented!()
+            }
+        }
+        panic!("Overwrite: {}, {:?}",off,self.0)
+    }
+    pub fn write<'b,Em : Embed>(&mut self,
+                                inp_sl: Transf<Em>,
+                                off: OptRef<'b,Offset>,
+                                inp_off: Transf<Em>,
+                                val: OptRef<'b,V>,
+                                val_inp: Transf<Em>,
+                                em: &mut Em)
+                                -> Result<Option<Transf<Em>>,Em::Error> {
+        let (mult,stat_off) = (off.as_ref().0).0;
+        match off.as_ref().1 {
+            None => self.write_static(inp_sl,stat_off,val,val_inp,em),
+            _ => unimplemented!()
+        }
+    }
+                 
 }
 
 impl<'a,V : Bytes+FromConst<'a>> MemObj<'a,V> {
@@ -188,11 +299,7 @@ impl<'a,V : Bytes+FromConst<'a>> MemObj<'a,V> {
     }
     pub fn byte_width(&self) -> usize {
         match self {
-            &MemObj::FreshObj(w) => if w%8==0 {
-                w/8
-            } else {
-                w/8+1
-            },
+            &MemObj::FreshObj(w) => w,
             &MemObj::ConstObj(ref dl,_,ref tp,ref tps) => {
                 let w = dl.type_size_in_bits(tp,tps);
                 if w%8==0 {
@@ -246,8 +353,8 @@ impl<'a,V : Bytes+FromConst<'a>> Composite for MemSlice<'a,V> {
         let mut off = 0;
         for obj in self.0.iter() {
             match *obj {
-                MemObj::FreshObj(_) => panic!("elem_sort called for MemObj::FreshObj"),
-                MemObj::ConstObj(_,_,_,_) => panic!("elem_sort called for MemObj::ConstObj"),
+                MemObj::FreshObj(_) => {},
+                MemObj::ConstObj(_,_,_,_) => {},
                 MemObj::ValueObj(ref v) => {
                     let sz = v.num_elem();
                     if pos < off+sz {
@@ -638,5 +745,51 @@ impl<'a,V : Composite> Composite for MemObj<'a,V> {
         FL: Fn(Transf<Em>, &mut Em) -> Result<Transf<Em>, Em::Error>,
         FR: Fn(Transf<Em>, &mut Em) -> Result<Transf<Em>, Em::Error> {
         Ok(None)
+    }
+}
+
+impl<'b,V> Semantic for MemObj<'b,V>
+    where V : Semantic {
+    type Meaning = V::Meaning;
+    fn meaning(&self,n: usize) -> Self::Meaning {
+        match self {
+            &MemObj::ValueObj(ref v) => v.meaning(n),
+            _ => panic!("meaning called for empty MemObj")
+        }
+    }
+    fn fmt_meaning<F : fmt::Write>(&self,m: &Self::Meaning,fmt: &mut F) -> Result<(),fmt::Error> {
+        match self {
+            &MemObj::ValueObj(ref v) => v.fmt_meaning(m,fmt),
+            _ => panic!("fmt_meaning called for empty MemObj")
+        }
+    }
+}
+
+impl<'a,'b,V> Semantics<'a> for MemObj<'b,V>
+    where V : Semantics<'a> {
+    type Meanings = OptionMeanings<V::Meanings>;
+    fn meanings(&'a self) -> Self::Meanings {
+        match self {
+            &MemObj::ValueObj(ref v) => OptionMeanings::Some(v.meanings()),
+            _ => OptionMeanings::None
+        }
+    }
+}
+
+impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for MemSlice<'b,V> {
+    type Meaning = VecMeaning<V::Meaning>;
+    fn meaning(&self,n: usize) -> Self::Meaning {
+        self.0.meaning(n)
+    }
+    fn fmt_meaning<F : fmt::Write>(&self,m: &Self::Meaning,fmt: &mut F) -> Result<(),fmt::Error> {
+        self.0.fmt_meaning(m,fmt)
+    }
+}
+
+impl<'a,'b : 'a,V : 'a+Bytes+FromConst<'b>> Semantics<'a> for MemSlice<'b,V>
+    where V : Semantics<'a> {
+    type Meanings = <Vec<MemObj<'b,V>> as Semantics<'a>>::Meanings;
+    fn meanings(&'a self) -> Self::Meanings {
+        self.0.meanings()
     }
 }
