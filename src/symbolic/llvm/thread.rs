@@ -707,11 +707,19 @@ impl<'a,V> ViewMut for FrameView<'a,V>
     }
 }
 
+#[derive(Clone)]
 pub enum ThreadMeaning<'b,V : Semantic+Bytes+FromConst<'b>> {
     CallStack(<CallStack<'b,V> as Semantic>::Meaning),
     Stack(<Stack<'b,V> as Semantic>::Meaning),
     StackTop(<StackTop<'b> as Semantic>::Meaning),
     Ret(<Option<V> as Semantic>::Meaning)
+}
+
+pub enum ThreadMeaningCtx<'b,V : Semantic+Bytes+FromConst<'b>> {
+    CallStack(<CallStack<'b,V> as Semantic>::MeaningCtx),
+    Stack(<Stack<'b,V> as Semantic>::MeaningCtx),
+    StackTop(<StackTop<'b> as Semantic>::MeaningCtx),
+    Ret(<Option<V> as Semantic>::MeaningCtx)
 }
 
 impl<'b,V : Semantic+Bytes+FromConst<'b>> PartialEq for ThreadMeaning<'b,V> {
@@ -804,13 +812,6 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> fmt::Debug for ThreadMeaning<'b,V> {
     }
 }
 
-pub enum ThreadMeanings<'a,'b : 'a,V : 'a+Semantics<'a>+Bytes+FromConst<'b>> {
-    CallStack(<CallStack<'b,V> as Semantics<'a>>::Meanings,&'a Thread<'b,V>),
-    Stack(<Stack<'b,V> as Semantics<'a>>::Meanings,&'a Thread<'b,V>),
-    StackTop(<StackTop<'b> as Semantics<'a>>::Meanings,&'a Thread<'b,V>),
-    Ret(<Option<V> as Semantics<'a>>::Meanings),
-}
-
 impl<'b,V : Semantic+Bytes+FromConst<'b>> ThreadMeaning<'b,V> {
     pub fn is_pc(&self) -> bool {
         match self {
@@ -831,34 +832,9 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> ThreadMeaning<'b,V> {
     }
 }
 
-impl<'a,'b : 'a,V : 'a+Semantics<'a>+Bytes+FromConst<'b>> Iterator for ThreadMeanings<'a,'b,V> {
-    type Item = ThreadMeaning<'b,V>;
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            *self = match self {
-                &mut ThreadMeanings::CallStack(ref mut it,thr) => match it.next() {
-                    Some(r) => return Some(ThreadMeaning::CallStack(r)),
-                    None => ThreadMeanings::Stack(thr.stack.meanings(),thr)
-                },
-                &mut ThreadMeanings::Stack(ref mut it,thr) => match it.next() {
-                    Some(r) => return Some(ThreadMeaning::Stack(r)),
-                    None => ThreadMeanings::StackTop(thr.stack_top.meanings(),thr)
-                },
-                &mut ThreadMeanings::StackTop(ref mut it,thr) => match it.next() {
-                    Some(r) => return Some(ThreadMeaning::StackTop(r)),
-                    None => ThreadMeanings::Ret(thr.ret.meanings())
-                },
-                &mut ThreadMeanings::Ret(ref mut it) => match it.next() {
-                    Some(r) => return Some(ThreadMeaning::Ret(r)),
-                    None => return None
-                }
-            }
-        }
-    }
-}
-
 impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for Thread<'b,V> {
     type Meaning = ThreadMeaning<'b,V>;
+    type MeaningCtx = ThreadMeaningCtx<'b,V>;
     fn meaning(&self,pos: usize) -> Self::Meaning {
         let off1 = self.call_stack.num_elem();
         if pos<off1 {
@@ -894,11 +870,75 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for Thread<'b,V> {
             }
         }
     }
-}
-
-impl<'a,'b : 'a,V : 'a+Semantics<'a>+Bytes+FromConst<'b>> Semantics<'a> for Thread<'b,V> {
-    type Meanings = ThreadMeanings<'a,'b,V>;
-    fn meanings(&'a self) -> Self::Meanings {
-        ThreadMeanings::CallStack(self.call_stack.meanings(),self)
+    fn first_meaning(&self) -> Option<(Self::MeaningCtx,Self::Meaning)> {
+        if let Some((ctx,m)) = self.call_stack.first_meaning() {
+            Some((ThreadMeaningCtx::CallStack(ctx),
+                  ThreadMeaning::CallStack(m)))
+        } else if let Some((ctx,m)) = self.stack.first_meaning() {
+            Some((ThreadMeaningCtx::Stack(ctx),
+                  ThreadMeaning::Stack(m)))
+        } else if let Some((ctx,m)) = self.stack_top.first_meaning() {
+            Some((ThreadMeaningCtx::StackTop(ctx),
+                  ThreadMeaning::StackTop(m)))
+        } else if let Some((ctx,m)) = self.ret.first_meaning() {
+            Some((ThreadMeaningCtx::Ret(ctx),
+                  ThreadMeaning::Ret(m)))
+        } else {
+            None
+        }
     }
+    fn next_meaning(&self,ctx: &mut Self::MeaningCtx,m: &mut Self::Meaning) -> bool {
+        let (nctx,nm) = match ctx {
+            &mut ThreadMeaningCtx::CallStack(ref mut cctx) => match m {
+                &mut ThreadMeaning::CallStack(ref mut cm) => if self.call_stack.next_meaning(cctx,cm) {
+                    return true
+                } else if let Some((ctx,m)) = self.stack.first_meaning() {
+                    (ThreadMeaningCtx::Stack(ctx),
+                     ThreadMeaning::Stack(m))
+                } else if let Some((ctx,m)) = self.stack_top.first_meaning() {
+                    (ThreadMeaningCtx::StackTop(ctx),
+                     ThreadMeaning::StackTop(m))
+                } else if let Some((ctx,m)) = self.ret.first_meaning() {
+                    (ThreadMeaningCtx::Ret(ctx),
+                     ThreadMeaning::Ret(m))
+                } else {
+                    return false
+                },
+                _ => unreachable!()
+            },
+            &mut ThreadMeaningCtx::Stack(ref mut cctx) => match m {
+                &mut ThreadMeaning::Stack(ref mut cm) => if self.stack.next_meaning(cctx,cm) {
+                    return true
+                } else if let Some((ctx,m)) = self.stack_top.first_meaning() {
+                    (ThreadMeaningCtx::StackTop(ctx),
+                     ThreadMeaning::StackTop(m))
+                } else if let Some((ctx,m)) = self.ret.first_meaning() {
+                    (ThreadMeaningCtx::Ret(ctx),
+                     ThreadMeaning::Ret(m))
+                } else {
+                    return false
+                },
+                _ => unreachable!()
+            },
+            &mut ThreadMeaningCtx::StackTop(ref mut cctx) => match m {
+                &mut ThreadMeaning::StackTop(ref mut cm) => if self.stack_top.next_meaning(cctx,cm) {
+                    return true
+                } else if let Some((ctx,m)) = self.ret.first_meaning() {
+                    (ThreadMeaningCtx::Ret(ctx),
+                     ThreadMeaning::Ret(m))
+                } else {
+                    return false
+                },
+                _ => unreachable!()
+            },
+            &mut ThreadMeaningCtx::Ret(ref mut cctx) => match m {
+                &mut ThreadMeaning::Ret(ref mut cm) => return self.ret.next_meaning(cctx,cm),
+                _ => unreachable!()
+            }
+        };
+        *ctx = nctx;
+        *m = nm;
+        true
+    }
+
 }

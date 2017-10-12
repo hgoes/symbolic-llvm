@@ -1588,10 +1588,17 @@ pub enum CompValue<Ptr,V> {
     Vector(Vec<CompValue<Ptr,V>>)
 }
 
+#[derive(Clone)]
 pub enum CompValueMeaning<Ptr : Semantic,V : Semantic> {
     Value(V::Meaning),
     Pointer(<BitField<Ptr> as Semantic>::Meaning),
     Vector(Box<VecMeaning<CompValueMeaning<Ptr,V>>>)
+}
+
+pub enum CompValueMeaningCtx<Ptr : Semantic,V : Semantic> {
+    Value(V::MeaningCtx),
+    Pointer(<BitField<Ptr> as Semantic>::MeaningCtx),
+    Vector(Box<CompValueMeaningCtx<Ptr,V>>)
 }
 
 impl<V : Semantic,U : Semantic> PartialEq for CompValueMeaning<V,U> {
@@ -1670,15 +1677,9 @@ impl<V : Semantic,U : Semantic> fmt::Debug for CompValueMeaning<V,U> {
     }
 }
 
-
-pub enum CompValueMeanings<'a,Ptr : 'a+Semantics<'a>,V : 'a+Semantics<'a>> {
-    Value(V::Meanings),
-    Pointer(<BitField<Ptr> as Semantics<'a>>::Meanings),
-    Vector(Box<VecMeanings<'a,CompValue<Ptr,V>>>)
-}
-
 impl<Ptr : Semantic,V : Semantic> Semantic for CompValue<Ptr,V> {
     type Meaning = CompValueMeaning<Ptr,V>;
+    type MeaningCtx = CompValueMeaningCtx<Ptr,V>;
     fn meaning(&self,pos: usize) -> Self::Meaning {
         match self {
             &CompValue::Value(ref v) => CompValueMeaning::Value(v.meaning(pos)),
@@ -1711,35 +1712,49 @@ impl<Ptr : Semantic,V : Semantic> Semantic for CompValue<Ptr,V> {
             }
         }
     }
-}
-
-impl<'a,Ptr : Semantics<'a>,V : Semantics<'a>> Iterator for CompValueMeanings<'a,Ptr,V> {
-    type Item = CompValueMeaning<Ptr,V>;
-    fn next(&mut self) -> Option<Self::Item> {
+    fn first_meaning(&self) -> Option<(Self::MeaningCtx,Self::Meaning)> {
         match self {
-            &mut CompValueMeanings::Value(ref mut it) => match it.next() {
-                Some(r) => Some(CompValueMeaning::Value(r)),
-                None => None
+            &CompValue::Value(ref v) => match v.first_meaning() {
+                None => None,
+                Some((ctx,m)) => Some((CompValueMeaningCtx::Value(ctx),
+                                       CompValueMeaning::Value(m)))
             },
-            &mut CompValueMeanings::Pointer(ref mut it) => match it.next() {
-                Some(r) => Some(CompValueMeaning::Pointer(r)),
-                None => None
+            &CompValue::Pointer(ref p) => match p.first_meaning() {
+                None => None,
+                Some((ctx,m)) => Some((CompValueMeaningCtx::Pointer(ctx),
+                                       CompValueMeaning::Pointer(m)))
             },
-            &mut CompValueMeanings::Vector(ref mut it) => match it.next() {
-                Some(r) => Some(CompValueMeaning::Vector(Box::new(r))),
-                None => None
+            &CompValue::Vector(ref v) => match v.first_meaning() {
+                None => None,
+                Some((ctx,m)) => Some((CompValueMeaningCtx::Vector(Box::new(ctx)),
+                                       CompValueMeaning::Vector(Box::new(m))))
             }
         }
     }
-}
-
-impl<'a,Ptr : 'a+Semantics<'a>,V : 'a+Semantics<'a>> Semantics<'a> for CompValue<Ptr,V> {
-    type Meanings = CompValueMeanings<'a,Ptr,V>;
-    fn meanings(&'a self) -> Self::Meanings {
+    fn next_meaning(&self,ctx: &mut Self::MeaningCtx,
+                    m: &mut Self::Meaning) -> bool {
         match self {
-            &CompValue::Value(ref v) => CompValueMeanings::Value(v.meanings()),
-            &CompValue::Pointer(ref p) => CompValueMeanings::Pointer(p.meanings()),
-            &CompValue::Vector(ref v) => CompValueMeanings::Vector(Box::new(v.meanings()))
+            &CompValue::Value(ref v) => match ctx {
+                &mut CompValueMeaningCtx::Value(ref mut cctx) => match m {
+                    &mut CompValueMeaning::Value(ref mut cm) => v.next_meaning(cctx,cm),
+                    _ => unreachable!()
+                },
+                _ => unreachable!()
+            },
+            &CompValue::Pointer(ref v) => match ctx {
+                &mut CompValueMeaningCtx::Pointer(ref mut cctx) => match m {
+                    &mut CompValueMeaning::Pointer(ref mut cm) => v.next_meaning(cctx,cm),
+                    _ => unreachable!()
+                },
+                _ => unreachable!()
+            },
+            &CompValue::Vector(ref v) => match ctx {
+                &mut CompValueMeaningCtx::Vector(ref mut cctx) => match m {
+                    &mut CompValueMeaning::Vector(ref mut cm) => v.next_meaning(cctx,cm),
+                    _ => unreachable!()
+                },
+                _ => unreachable!()
+            }
         }
     }
 }
@@ -1752,18 +1767,19 @@ pub struct ByteWidth<V> {
 
 impl<V : Semantic> Semantic for ByteWidth<V> {
     type Meaning = V::Meaning;
+    type MeaningCtx = V::MeaningCtx;
     fn meaning(&self,pos: usize) -> Self::Meaning {
         self.value.meaning(pos)
     }
     fn fmt_meaning<F : fmt::Write>(&self,m: &Self::Meaning,fmt: &mut F) -> Result<(),fmt::Error> {
         self.value.fmt_meaning(m,fmt)
     }
-}
-
-impl<'a,V : Semantics<'a>> Semantics<'a> for ByteWidth<V> {
-    type Meanings = V::Meanings;
-    fn meanings(&'a self) -> Self::Meanings {
-        self.value.meanings()
+    fn first_meaning(&self) -> Option<(Self::MeaningCtx,Self::Meaning)> {
+        self.value.first_meaning()
+    }
+    fn next_meaning(&self,ctx: &mut Self::MeaningCtx,
+                    m: &mut Self::Meaning) -> bool {
+        self.value.next_meaning(ctx,m)
     }
 }
 
@@ -1775,18 +1791,18 @@ pub enum BitVecValue {
 
 impl Semantic for BitVecValue {
     type Meaning = ();
+    type MeaningCtx = ();
     fn meaning(&self,pos: usize) -> Self::Meaning {
         ()
     }
     fn fmt_meaning<F : fmt::Write>(&self,_:&Self::Meaning,fmt: &mut F) -> Result<(),fmt::Error> {
         write!(fmt,"#")
     }
-}
-
-impl<'a> Semantics<'a> for BitVecValue {
-    type Meanings = Once<()>;
-    fn meanings(&'a self) -> Self::Meanings {
-        once(())
+    fn first_meaning(&self) -> Option<(Self::MeaningCtx,Self::Meaning)> {
+        Some(((),()))
+    }
+    fn next_meaning(&self,_: &mut Self::MeaningCtx,_: &mut Self::Meaning) -> bool {
+        false
     }
 }
 

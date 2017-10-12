@@ -751,6 +751,7 @@ impl<'a,V : Composite> Composite for MemObj<'a,V> {
 impl<'b,V> Semantic for MemObj<'b,V>
     where V : Semantic {
     type Meaning = V::Meaning;
+    type MeaningCtx = V::MeaningCtx;
     fn meaning(&self,n: usize) -> Self::Meaning {
         match self {
             &MemObj::ValueObj(ref v) => v.meaning(n),
@@ -763,33 +764,35 @@ impl<'b,V> Semantic for MemObj<'b,V>
             _ => panic!("fmt_meaning called for empty MemObj")
         }
     }
-}
-
-impl<'a,'b,V> Semantics<'a> for MemObj<'b,V>
-    where V : Semantics<'a> {
-    type Meanings = OptionMeanings<V::Meanings>;
-    fn meanings(&'a self) -> Self::Meanings {
+    fn first_meaning(&self) -> Option<(Self::MeaningCtx,Self::Meaning)> {
         match self {
-            &MemObj::ValueObj(ref v) => OptionMeanings::Some(v.meanings()),
-            _ => OptionMeanings::None
+            &MemObj::ValueObj(ref v) => v.first_meaning(),
+            _ => None
+        }
+    }
+    fn next_meaning(&self,ctx: &mut Self::MeaningCtx,
+                    m: &mut Self::Meaning) -> bool {
+        match self {
+            &MemObj::ValueObj(ref v) => v.next_meaning(ctx,m),
+            _ => false
         }
     }
 }
 
 impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for MemSlice<'b,V> {
     type Meaning = VecMeaning<V::Meaning>;
+    type MeaningCtx = V::MeaningCtx;
     fn meaning(&self,n: usize) -> Self::Meaning {
         self.0.meaning(n)
     }
     fn fmt_meaning<F : fmt::Write>(&self,m: &Self::Meaning,fmt: &mut F) -> Result<(),fmt::Error> {
         self.0.fmt_meaning(m,fmt)
     }
-}
-
-impl<'a,'b : 'a,V : 'a+Bytes+FromConst<'b>> Semantics<'a> for MemSlice<'b,V>
-    where V : Semantics<'a> {
-    type Meanings = <Vec<MemObj<'b,V>> as Semantics<'a>>::Meanings;
-    fn meanings(&'a self) -> Self::Meanings {
-        self.0.meanings()
+    fn first_meaning(&self) -> Option<(Self::MeaningCtx,Self::Meaning)> {
+        self.0.first_meaning()
+    }
+    fn next_meaning(&self,ctx: &mut Self::MeaningCtx,
+                    m: &mut Self::Meaning) -> bool {
+        self.0.next_meaning(ctx,m)
     }
 }

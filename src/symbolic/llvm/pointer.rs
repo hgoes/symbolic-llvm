@@ -21,14 +21,6 @@ pub trait Pointer<'b> : Composite {
                           -> Result<Transf<Em>,Em::Error>;
 }
 
-/*pub trait PointerArith<'b> : Pointer<'b> {
-    type PtrDiff;
-    fn ptr_sub<Em : Embed>(&Self,Transf<Em>,
-                           &Self,Transf<Em>,
-                           &mut Em)
-                           -> Result<(Self::PtrDiff,Transf<Em>),Em::Error>;
-}*/
-
 pub type BasePointer<'a> = Choice<(PointerTrg<'a>,Offset)>;
 
 pub type Offset = (Data<(usize,usize)>,Option<Singleton>);
@@ -264,7 +256,7 @@ impl<'a> Pointer<'a> for BasePointer<'a> {
     }
 }
 
-#[derive(PartialEq,Eq,PartialOrd,Ord,Hash,Debug)]
+#[derive(PartialEq,Eq,PartialOrd,Ord,Hash,Debug,Clone)]
 pub enum PointerTrgMeaning {
     HeapSelector,
     ThreadSelector,
@@ -272,16 +264,9 @@ pub enum PointerTrgMeaning {
     AllocSelector
 }
 
-pub enum PointerTrgMeanings {
-    HeapSelector,
-    ThreadSelector,
-    FrameSelector,
-    AllocSelector,
-    End
-}
-
 impl<'a> Semantic for PointerTrg<'a> {
     type Meaning = PointerTrgMeaning;
+    type MeaningCtx = ();
     fn meaning(&self,pos: usize) -> Self::Meaning {
         match self {
             &PointerTrg::Heap(_,_) if pos==0 => PointerTrgMeaning::HeapSelector,
@@ -310,38 +295,25 @@ impl<'a> Semantic for PointerTrg<'a> {
             }
         }
     }
-}
-
-impl Iterator for PointerTrgMeanings {
-    type Item = PointerTrgMeaning;
-    fn next(&mut self) -> Option<Self::Item> {
-        let (res,new) = match self {
-            &mut PointerTrgMeanings::HeapSelector
-                => (PointerTrgMeaning::HeapSelector,
-                    PointerTrgMeanings::End),
-            &mut PointerTrgMeanings::ThreadSelector
-                => (PointerTrgMeaning::ThreadSelector,
-                    PointerTrgMeanings::FrameSelector),
-            &mut PointerTrgMeanings::FrameSelector
-                => (PointerTrgMeaning::FrameSelector,
-                    PointerTrgMeanings::AllocSelector),
-            &mut PointerTrgMeanings::AllocSelector
-                => (PointerTrgMeaning::AllocSelector,
-                    PointerTrgMeanings::End),
-            &mut PointerTrgMeanings::End => return None
-        };
-        *self = new;
-        Some(res)
-    }
-}
-
-impl<'a,'b> Semantics<'a> for PointerTrg<'b> {
-    type Meanings = PointerTrgMeanings;
-    fn meanings(&'a self) -> Self::Meanings {
+    fn first_meaning(&self) -> Option<(Self::MeaningCtx,Self::Meaning)> {
         match self {
-            &PointerTrg::Heap(_,_) => PointerTrgMeanings::HeapSelector,
-            &PointerTrg::Stack(_,_,_,_,_,_) => PointerTrgMeanings::ThreadSelector,
-            _ => PointerTrgMeanings::End
+            &PointerTrg::Heap(..) => Some(((),PointerTrgMeaning::HeapSelector)),
+            &PointerTrg::Stack(..) => Some(((),PointerTrgMeaning::ThreadSelector)),
+            _ => None
+        }
+    }
+    fn next_meaning(&self,_: &mut Self::MeaningCtx,m: &mut Self::Meaning) -> bool {
+        match m {
+            &mut PointerTrgMeaning::HeapSelector => false,
+            &mut PointerTrgMeaning::ThreadSelector => {
+                *m = PointerTrgMeaning::FrameSelector;
+                true
+            },
+            &mut PointerTrgMeaning::FrameSelector => {
+                *m = PointerTrgMeaning::AllocSelector;
+                true
+            },
+            &mut PointerTrgMeaning::AllocSelector => false
         }
     }
 }
@@ -508,7 +480,7 @@ impl<T : Composite> Composite for BitField<T> {
     }
 }
 
-#[derive(PartialEq,Eq,PartialOrd,Ord,Hash,Debug)]
+#[derive(PartialEq,Eq,PartialOrd,Ord,Hash,Debug,Clone)]
 pub enum BitFieldMeaning<M> {
     Obj(M),
     Field
@@ -516,6 +488,7 @@ pub enum BitFieldMeaning<M> {
 
 impl<T : Semantic> Semantic for BitField<T> {
     type Meaning = BitFieldMeaning<T::Meaning>;
+    type MeaningCtx = BitFieldMeaning<T::MeaningCtx>;
     fn meaning(&self,pos: usize) -> Self::Meaning {
         let sz = self.obj.num_elem();
         if pos<sz {
@@ -535,33 +508,36 @@ impl<T : Semantic> Semantic for BitField<T> {
             }
         }
     }
-}
-
-pub struct BitFieldMeanings<It> {
-    it: It,
-    has_bits: bool
-}
-
-impl<It : Iterator> Iterator for BitFieldMeanings<It> {
-    type Item = BitFieldMeaning<It::Item>;
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.it.next() {
-            Some(r) => Some(BitFieldMeaning::Obj(r)),
-            None => if self.has_bits {
-                self.has_bits = false;
-                Some(BitFieldMeaning::Field)
+    fn first_meaning(&self) -> Option<(Self::MeaningCtx,Self::Meaning)> {
+        match self.obj.first_meaning() {
+            None => if self.size.is_some() {
+                Some((BitFieldMeaning::Field,
+                      BitFieldMeaning::Field))
             } else {
                 None
-            }
+            },
+            Some((ctx,m)) => Some((BitFieldMeaning::Obj(ctx),
+                                   BitFieldMeaning::Obj(m)))
         }
     }
-}
-
-impl<'a,T : Semantics<'a>> Semantics<'a> for BitField<T> {
-    type Meanings = BitFieldMeanings<T::Meanings>;
-    fn meanings(&'a self) -> Self::Meanings {
-        BitFieldMeanings { it: self.obj.meanings(),
-                           has_bits: self.size.is_some() }
+    fn next_meaning(&self,ctx: &mut Self::MeaningCtx,m: &mut Self::Meaning) -> bool {
+        let (nctx,nm) = match ctx {
+            &mut BitFieldMeaning::Field => return false,
+            &mut BitFieldMeaning::Obj(ref mut cctx) => match m {
+                &mut BitFieldMeaning::Obj(ref mut cm) => if self.obj.next_meaning(cctx,cm) {
+                    return true
+                } else if self.size.is_some() {
+                    (BitFieldMeaning::Field,
+                     BitFieldMeaning::Field)
+                } else {
+                    return false
+                },
+                _ => unreachable!()
+            }
+        };
+        *ctx = nctx;
+        *m = nm;
+        true
     }
 }
 

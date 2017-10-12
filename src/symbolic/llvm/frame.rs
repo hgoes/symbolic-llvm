@@ -592,9 +592,15 @@ impl<'a,V> ViewMut for PhiView<'a,V>
     }
 }
 
+#[derive(Clone)]
 pub enum FrameMeaning<'b,V : Semantic+Bytes+FromConst<'b>> {
     Previous(<PrevFrame<'b> as Semantic>::Meaning),
     Allocations(<Allocations<'b,V> as Semantic>::Meaning)
+}
+
+pub enum FrameMeaningCtx<'b,V : Semantic+Bytes+FromConst<'b>> {
+    Previous(<PrevFrame<'b> as Semantic>::MeaningCtx),
+    Allocations(<Allocations<'b,V> as Semantic>::MeaningCtx)
 }
 
 impl<'b,V : Semantic+Bytes+FromConst<'b>> PartialEq for FrameMeaning<'b,V> {
@@ -666,11 +672,6 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> fmt::Debug for FrameMeaning<'b,V> {
     }
 }
 
-pub enum FrameMeanings<'a,'b : 'a,V : 'a+Semantics<'a>+Bytes+FromConst<'b>> {
-    Previous(<PrevFrame<'b> as Semantics<'a>>::Meanings,&'a Allocations<'b,V>),
-    Allocations(<Allocations<'b,V> as Semantics<'a>>::Meanings)
-}
-
 impl<'b,V : Semantic+Bytes+FromConst<'b>> FrameMeaning<'b,V> {
     pub fn is_pc(&self) -> bool {
         match self {
@@ -680,26 +681,9 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> FrameMeaning<'b,V> {
     }
 }
 
-impl<'a,'b : 'a,V : 'a+Semantics<'a>+Bytes+FromConst<'b>> Iterator for FrameMeanings<'a,'b,V> {
-    type Item = FrameMeaning<'b,V>;
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            *self = match self {
-                &mut FrameMeanings::Previous(ref mut it,ref allocs) => match it.next() {
-                    Some(r) => return Some(FrameMeaning::Previous(r)),
-                    None => FrameMeanings::Allocations(allocs.meanings())
-                },
-                &mut FrameMeanings::Allocations(ref mut it) => match it.next() {
-                    Some(r) => return Some(FrameMeaning::Allocations(r)),
-                    None => return None
-                }
-            }
-        }
-    }
-}
-
 impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for Frame<'b,V> {
     type Meaning = FrameMeaning<'b,V>;
+    type MeaningCtx = FrameMeaningCtx<'b,V>;
     fn meaning(&self,n: usize) -> Self::Meaning {
         let sz1 = self.previous.num_elem();
         if n < sz1 {
@@ -719,20 +703,62 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for Frame<'b,V> {
             }
         }
     }
-}
-
-impl<'a,'b : 'a,V : 'a+Semantics<'a>+Bytes+FromConst<'b>> Semantics<'a> for Frame<'b,V> {
-    type Meanings = FrameMeanings<'a,'b,V>;
-    fn meanings(&'a self) -> Self::Meanings {
-        FrameMeanings::Previous(self.previous.meanings(),&self.allocations)
+    fn first_meaning(&self) -> Option<(Self::MeaningCtx,Self::Meaning)> {
+        match self.previous.first_meaning() {
+            Some((ctx,m)) => Some((FrameMeaningCtx::Previous(ctx),
+                                   FrameMeaning::Previous(m))),
+            None => match self.allocations.first_meaning() {
+                Some((ctx,m)) => Some((FrameMeaningCtx::Allocations(ctx),
+                                       FrameMeaning::Allocations(m))),
+                None => None
+            }
+        }
+    }
+    fn next_meaning(&self,ctx: &mut Self::MeaningCtx,
+                    m: &mut Self::Meaning) -> bool {
+        let nm = match m {
+            &mut FrameMeaning::Previous(ref mut cm) => {
+                let (nctx,nm) = match ctx {
+                    &mut FrameMeaningCtx::Previous(ref mut cctx)
+                        => if self.previous.next_meaning(cctx,cm) {
+                            return true
+                        } else {
+                            match self.allocations.first_meaning() {
+                                None => return false,
+                                Some((nctx,nm))
+                                    => (FrameMeaningCtx::Allocations(nctx),
+                                        FrameMeaning::Allocations(nm))
+                            }
+                        },
+                    _ => unreachable!()
+                };
+                *ctx = nctx;
+                nm
+            },
+            &mut FrameMeaning::Allocations(ref mut cm) => match ctx {
+                &mut FrameMeaningCtx::Allocations(ref mut cctx)
+                    => return self.allocations.next_meaning(cctx,cm),
+                _ => unreachable!()
+            }
+        };
+        *m = nm;
+        true
     }
 }
 
+#[derive(Clone)]
 pub enum CallFrameMeaning<'b,V : Semantic> {
     Values(<Assoc<&'b String,V> as Semantic>::Meaning),
     Arguments(<Vec<V> as Semantic>::Meaning),
     Activation(<Activation<'b> as Semantic>::Meaning),
     Phi(<Choice<Data<&'b String>> as Semantic>::Meaning)
+}
+
+pub enum CallFrameMeaningCtx<'b,V : Semantic> {
+    Values(<Assoc<&'b String,V> as Semantic>::MeaningCtx),
+    Arguments(<Vec<V> as Semantic>::MeaningCtx),
+    Activation(<Activation<'b> as Semantic>::MeaningCtx),
+    Phi(<Choice<Data<&'b String>> as Semantic>::MeaningCtx)
 }
 
 impl<'b,V : Semantic> PartialEq for CallFrameMeaning<'b,V> {
@@ -825,13 +851,6 @@ impl<'b,V : Semantic> fmt::Debug for CallFrameMeaning<'b,V> {
     }
 }
 
-pub enum CallFrameMeanings<'a,'b : 'a,V : 'a+Semantics<'a>> {
-    Values(<Assoc<&'b String,V> as Semantics<'a>>::Meanings,&'a CallFrame<'b,V>),
-    Arguments(<Vec<V> as Semantics<'a>>::Meanings,&'a CallFrame<'b,V>),
-    Activation(<Activation<'b> as Semantics<'a>>::Meanings,&'a CallFrame<'b,V>),
-    Phi(<Phi<'b> as Semantics<'a>>::Meanings)
-}
-
 impl<'b,V : Semantic> CallFrameMeaning<'b,V> {
     pub fn is_pc(&self) -> bool {
         match self {
@@ -842,34 +861,9 @@ impl<'b,V : Semantic> CallFrameMeaning<'b,V> {
     }
 }
 
-impl<'a,'b : 'a,V : 'a+Semantics<'a>> Iterator for CallFrameMeanings<'a,'b,V> {
-    type Item = CallFrameMeaning<'b,V>;
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            *self = match self {
-                &mut CallFrameMeanings::Values(ref mut it,cf) => match it.next() {
-                    Some(r) => return Some(CallFrameMeaning::Values(r)),
-                    None => CallFrameMeanings::Arguments(cf.arguments.meanings(),cf)
-                },
-                &mut CallFrameMeanings::Arguments(ref mut it,cf) => match it.next() {
-                    Some(r) => return Some(CallFrameMeaning::Arguments(r)),
-                    None => CallFrameMeanings::Activation(cf.activation.meanings(),cf)
-                },
-                &mut CallFrameMeanings::Activation(ref mut it,cf) => match it.next() {
-                    Some(r) => return Some(CallFrameMeaning::Activation(r)),
-                    None => CallFrameMeanings::Phi(cf.phi.meanings())
-                },
-                &mut CallFrameMeanings::Phi(ref mut it) => match it.next() {
-                    Some(r) => return Some(CallFrameMeaning::Phi(r)),
-                    None => return None
-                }
-            }
-        }
-    }
-}
-
 impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for CallFrame<'b,V> {
     type Meaning = CallFrameMeaning<'b,V>;
+    type MeaningCtx = CallFrameMeaningCtx<'b,V>;
     fn meaning(&self,pos: usize) -> Self::Meaning {
         let off1 = self.values.num_elem();
         if pos < off1 {
@@ -905,11 +899,72 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for CallFrame<'b,V> {
             }
         }
     }
-}
-
-impl<'a,'b : 'a,V : 'a+Semantics<'a>+Bytes+FromConst<'b>> Semantics<'a> for CallFrame<'b,V> {
-    type Meanings = CallFrameMeanings<'a,'b,V>;
-    fn meanings(&'a self) -> Self::Meanings {
-        CallFrameMeanings::Values(self.values.meanings(),self)
+    fn first_meaning(&self) -> Option<(Self::MeaningCtx,Self::Meaning)> {
+        if let Some((ctx,m)) = self.values.first_meaning() {
+            Some((CallFrameMeaningCtx::Values(ctx),
+                  CallFrameMeaning::Values(m)))
+        } else if let Some((ctx,m)) = self.arguments.first_meaning() {
+            Some((CallFrameMeaningCtx::Arguments(ctx),
+                  CallFrameMeaning::Arguments(m)))
+        } else if let Some((ctx,m)) = self.activation.first_meaning() {
+            Some((CallFrameMeaningCtx::Activation(ctx),
+                  CallFrameMeaning::Activation(m)))
+        } else if let Some((ctx,m)) = self.phi.first_meaning() {
+            Some((CallFrameMeaningCtx::Phi(ctx),
+                  CallFrameMeaning::Phi(m)))
+        } else {
+            None
+        }
+    }
+    fn next_meaning(&self,ctx: &mut Self::MeaningCtx,
+                    m: &mut Self::Meaning) -> bool {
+        let pos = match ctx {
+            &mut CallFrameMeaningCtx::Values(ref mut cctx) => match m {
+                &mut CallFrameMeaning::Values(ref mut cm) => if self.values.next_meaning(cctx,cm) {
+                    return true
+                } else { 0 },
+                _ => unreachable!()
+            },            
+            &mut CallFrameMeaningCtx::Arguments(ref mut cctx) => match m {
+                &mut CallFrameMeaning::Arguments(ref mut cm) => if self.arguments.next_meaning(cctx,cm) {
+                    return true
+                } else { 1 },
+                _ => unreachable!()
+            },
+            &mut CallFrameMeaningCtx::Activation(ref mut cctx) => match m {
+                &mut CallFrameMeaning::Activation(ref mut cm) => if self.activation.next_meaning(cctx,cm) {
+                    return true
+                } else { 2 },
+                _ => unreachable!()
+            },
+            &mut CallFrameMeaningCtx::Phi(ref mut cctx) => match m {
+                &mut CallFrameMeaning::Phi(ref mut cm) => if self.phi.next_meaning(cctx,cm) {
+                    return true
+                } else {
+                    return false
+                },
+                _ => unreachable!()
+            }
+        };
+        if pos==0 {
+            if let Some((nctx,nm)) = self.arguments.first_meaning() {
+                *ctx = CallFrameMeaningCtx::Arguments(nctx);
+                *m = CallFrameMeaning::Arguments(nm);
+                return true
+            }
+        }
+        if pos<=1 {
+            if let Some((nctx,nm)) = self.activation.first_meaning() {
+                *ctx = CallFrameMeaningCtx::Activation(nctx);
+                *m = CallFrameMeaning::Activation(nm);
+                return true
+            }
+        }
+        if let Some((nctx,nm)) = self.phi.first_meaning() {
+            *ctx = CallFrameMeaningCtx::Phi(nctx);
+            *m = CallFrameMeaning::Phi(nm);
+            return true
+        }
+        false
     }
 }

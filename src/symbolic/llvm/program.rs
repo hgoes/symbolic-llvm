@@ -984,10 +984,17 @@ impl<'a,V> ViewMut for PointerView<'a,V>
     }
 }
 
+#[derive(Clone)]
 pub enum ProgramMeaning<'b,V : Semantic+Bytes+FromConst<'b>> {
     Threads(<Threads<'b,V> as Semantic>::Meaning),
     Global(<Globals<'b,V> as Semantic>::Meaning),
     Heap(<Heap<'b,V> as Semantic>::Meaning)
+}
+
+pub enum ProgramMeaningCtx<'b,V : Semantic+Bytes+FromConst<'b>> {
+    Threads(<Threads<'b,V> as Semantic>::MeaningCtx),
+    Global(<Globals<'b,V> as Semantic>::MeaningCtx),
+    Heap(<Heap<'b,V> as Semantic>::MeaningCtx)
 }
 
 impl<'b,V : Semantic+Bytes+FromConst<'b>> PartialEq for ProgramMeaning<'b,V> {
@@ -1067,12 +1074,6 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> fmt::Debug for ProgramMeaning<'b,V> {
 }
 
 
-pub enum ProgramMeanings<'a,'b : 'a,V : 'a+Semantics<'a>+Bytes+FromConst<'b>> {
-    Threads(<Threads<'b,V> as Semantics<'a>>::Meanings,&'a Program<'b,V>),
-    Global(<Globals<'b,V> as Semantics<'a>>::Meanings,&'a Program<'b,V>),
-    Heap(<Heap<'b,V> as Semantics<'a>>::Meanings)
-}
-
 impl<'b,V : Semantic+Bytes+FromConst<'b>> ProgramMeaning<'b,V> {
     pub fn is_pc(&self) -> bool {
         match self {
@@ -1082,30 +1083,9 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> ProgramMeaning<'b,V> {
     }
 }
 
-impl<'a,'b : 'a,V : 'a+Semantics<'a>+Bytes+FromConst<'b>> Iterator for ProgramMeanings<'a,'b,V> {
-    type Item = ProgramMeaning<'b,V>;
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            *self = match self {
-                &mut ProgramMeanings::Threads(ref mut it,prog) => match it.next() {
-                    Some(r) => return Some(ProgramMeaning::Threads(r)),
-                    None => ProgramMeanings::Global(prog.global.meanings(),prog)
-                },
-                &mut ProgramMeanings::Global(ref mut it,prog) => match it.next() {
-                    Some(r) => return Some(ProgramMeaning::Global(r)),
-                    None => ProgramMeanings::Heap(prog.heap.meanings())
-                },
-                &mut ProgramMeanings::Heap(ref mut it) => match it.next() {
-                    Some(r) => return Some(ProgramMeaning::Heap(r)),
-                    None => return None
-                }
-            }
-        }
-    }
-}
-
 impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for Program<'b,V> {
     type Meaning = ProgramMeaning<'b,V>;
+    type MeaningCtx = ProgramMeaningCtx<'b,V>;
     fn meaning(&self,pos: usize) -> Self::Meaning {
         let off1 = self.threads.num_elem();
         if pos<off1 {
@@ -1133,12 +1113,55 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for Program<'b,V> {
             }
         }
     }
-}
-
-impl<'a,'b : 'a,V : 'a+Semantics<'a>+Bytes+FromConst<'b>> Semantics<'a> for Program<'b,V> {
-    type Meanings = ProgramMeanings<'a,'b,V>;
-    fn meanings(&'a self) -> Self::Meanings {
-        ProgramMeanings::Threads(self.threads.meanings(),self)
+    fn first_meaning(&self) -> Option<(Self::MeaningCtx,Self::Meaning)> {
+        if let Some((ctx,m)) = self.threads.first_meaning() {
+            Some((ProgramMeaningCtx::Threads(ctx),
+                  ProgramMeaning::Threads(m)))
+        } else if let Some((ctx,m)) = self.global.first_meaning() {
+            Some((ProgramMeaningCtx::Global(ctx),
+                  ProgramMeaning::Global(m)))
+        } else if let Some((ctx,m)) = self.heap.first_meaning() {
+            Some((ProgramMeaningCtx::Heap(ctx),
+                  ProgramMeaning::Heap(m)))
+        } else {
+            None
+        }
+    }
+    fn next_meaning(&self,ctx: &mut Self::MeaningCtx,m: &mut Self::Meaning) -> bool {
+        let (nctx,nm) = match ctx {
+            &mut ProgramMeaningCtx::Threads(ref mut cctx) => match m {
+                &mut ProgramMeaning::Threads(ref mut cm) => if self.threads.next_meaning(cctx,cm) {
+                    return true
+                } else if let Some((nctx,nm)) = self.global.first_meaning() {
+                    (ProgramMeaningCtx::Global(nctx),
+                     ProgramMeaning::Global(nm))
+                } else if let Some((nctx,nm)) = self.heap.first_meaning() {
+                    (ProgramMeaningCtx::Heap(nctx),
+                     ProgramMeaning::Heap(nm))
+                } else {
+                    return false
+                },
+                _ => unreachable!()
+            },
+            &mut ProgramMeaningCtx::Global(ref mut cctx) => match m {
+                &mut ProgramMeaning::Global(ref mut cm) => if self.global.next_meaning(cctx,cm) {
+                    return true
+                } else if let Some((nctx,nm)) = self.heap.first_meaning() {
+                    (ProgramMeaningCtx::Heap(nctx),
+                     ProgramMeaning::Heap(nm))
+                } else {
+                    return false
+                },
+                _ => unreachable!()
+            },
+            &mut ProgramMeaningCtx::Heap(ref mut cctx) => match m {
+                &mut ProgramMeaning::Heap(ref mut cm) => return self.heap.next_meaning(cctx,cm),
+                _ => unreachable!()
+            }
+        };
+        *ctx = nctx;
+        *m = nm;
+        true
     }
 }
 
