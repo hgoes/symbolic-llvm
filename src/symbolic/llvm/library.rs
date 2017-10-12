@@ -150,6 +150,17 @@ impl<'a,V : 'a+Bytes+FromConst<'a>+IntValue+Pointer<'a>+Debug> Library<'a,V> for
                 conds.truncate(cpos);
                 Ok(true)
             },
+            x if x.starts_with("llvm.expect.") => {
+                let (val,val_inp) = get_vec_elem(0,OptRef::Ref(args),
+                                                 args_inp.clone())?;
+                let rret = match ret_view {
+                    None => panic!("llvm.expect without return"),
+                    Some(r) => r
+                };
+                rret.insert_cond(nprog,val.as_obj(),val_inp,
+                                 conds,updates,prog_inp,em)?;
+                Ok(true)
+            },
             _ => Ok(false)
         }
     }
