@@ -7,7 +7,7 @@ use super::mem::{Bytes,FromConst,MemSlice};
 use super::{InstructionRef};
 use super::thread::*;
 use super::frame::*;
-use super::pointer::{PointerTrg,Offset};
+use super::pointer::{Pointer,PointerTrg,Offset};
 use super::error::{Error,Errors,add_error};
 use std::marker::PhantomData;
 use num_bigint::{BigInt,BigUint};
@@ -16,6 +16,7 @@ use std::cmp::Ordering;
 use std::hash::{Hash,Hasher};
 use std::fmt;
 use std::fmt::Debug;
+use llvm_ir::datalayout::{DataLayout};
 
 pub const STEP_BW: usize = 32;
 
@@ -1180,7 +1181,10 @@ pub enum MemLookups<'a : 'b,'b,V : 'a,Em : DeriveValues>
                FrameId<'a>,Transf<Em>,
                InstructionRef<'a>,Transf<Em>,
                &'b [Em::Expr]),
-    Stack(StackLookups<'a,'b,V,Em>)
+    Stack(StackLookups<'a,'b,V,Em>),
+    Aux(usize),
+    AuxArray,
+    End
 }
 
 pub struct StackLookups<'a : 'b,'b,V : 'a,Em : DeriveValues>
@@ -1405,9 +1409,10 @@ impl<'a : 'b,'b,V : 'a+Bytes+FromConst<'a>+Debug,Em : DeriveValues> CondIterator
     }
 }
 
-impl<'a,V : Bytes+FromConst<'a>+Debug> MemLookup<'a,V> {
+impl<'a,V : Bytes+FromConst<'a>+Pointer<'a>+Debug> MemLookup<'a,V> {
     pub fn load<'b,Em : Embed>(
         &self,
+        dl: &'a DataLayout,
         off: &'b Offset,
         off_inp: Transf<Em>,
         len: usize,
@@ -1424,6 +1429,31 @@ impl<'a,V : Bytes+FromConst<'a>+Debug> MemLookup<'a,V> {
                     None => panic!("Reading {} bytes from {:?} with offset {:?} failed.",len,sl,off),
                     Some(res) => Ok(res)
                 }
+            },
+            &MemLookup::AuxArray => {
+                let &(Data((mult,stat)),ref dyn) = off;
+                match dyn {
+                    &Some(_) => panic!("Dynamic index into arguments"),
+                    &None => {
+                        let (ptr_sz,_,_) = dl.pointer_alignment(0);
+                        let ptr_byte_width = ptr_sz/8;
+                        let index = mult/(ptr_byte_width as usize);
+                        let cond_true = Transformation::const_bool(true,em)?;
+                        let ptr_trg = PointerTrg::Aux(index);
+                        let ptr_base = (ptr_trg,(Data((ptr_byte_width as usize,0)),None));
+                        let (ch0,ch0_inp) = choice_empty();
+                        let (ch1,ch1_inp) = choice_insert(OptRef::Owned(ch0),
+                                                          ch0_inp,
+                                                          cond_true,
+                                                          OptRef::Owned(ptr_base),
+                                                          Transformation::id(0))?;
+                        Ok(V::from_pointer(ptr_byte_width as usize,ch1,ch1_inp))
+                    }
+                }
+            },
+            &MemLookup::Aux(n) => {
+                let bytes = &prog.aux[n];
+                unimplemented!()
             },
             _ => unimplemented!()
         }
@@ -1477,6 +1507,8 @@ impl<'a,'b,V : Bytes+FromConst<'a>,Em : DeriveValues> MemLookups<'a,'b,V,Em> {
                 let instr_idx = Transformation::view(2,1,trg_inp);
                 Ok(MemLookups::StackStart(prog,thr,thr_idx,fr.clone(),fr_idx,instr,instr_idx,exprs))
             },
+            &PointerTrg::Aux(n) => Ok(MemLookups::Aux(n)),
+            &PointerTrg::AuxArray => Ok(MemLookups::AuxArray),
             _ => panic!("MemLookups for {:?}",trg)
         }
     }
@@ -1528,7 +1560,12 @@ impl<'a,'b,Em : DeriveValues,V : Bytes+FromConst<'a>+Debug
             &mut MemLookups::Stack(ref mut it) => match it.next(conds,pos,em)? {
                 None => return Ok(None),
                 Some(pview) => return Ok(Some(MemLookup::Slice(pview)))
-            }
+            },
+            &mut MemLookups::Aux(n) => (MemLookups::End,
+                                        Some(MemLookup::Aux(n))),
+            &mut MemLookups::AuxArray => (MemLookups::End,
+                                          Some(MemLookup::AuxArray)),
+            &mut MemLookups::End => return Ok(None)
         };
         *self = nself;
         Ok(ret)

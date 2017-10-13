@@ -814,7 +814,8 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
                                                           em)?;
                                     let cpos = conds.len();
                                     while let Some(lookup) = lookup_iter.next(&mut conds,cpos,em)? {
-                                        let (load,load_inp) = lookup.load(off,off_inp.clone(),
+                                        let (load,load_inp) = lookup.load(&m.datalayout,
+                                                                          off,off_inp.clone(),
                                                                           sz,prog,prog_inp.clone(),em)?;
                                         value_view.insert_cond(&mut nprog,
                                                                load.as_obj(),load_inp,
@@ -982,7 +983,8 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
                                 } else {
                                     let bw = rval.byte_width();
                                     let rcond = Transformation::and(conds.clone());
-                                    let (pval,pval_inp) = lookup.load(off,off_inp.clone(),bw,
+                                    let (pval,pval_inp) = lookup.load(&m.datalayout,
+                                                                      off,off_inp.clone(),bw,
                                                                       &prog,prog_inp.clone(),
                                                                       em)?;
                                     let (nval,nval_inp) = ite(OptRef::Ref(&rval),

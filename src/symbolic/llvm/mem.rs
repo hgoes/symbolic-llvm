@@ -243,6 +243,31 @@ impl<'a,V : Bytes+FromConst<'a>+Clone+Debug> MemSlice<'a,V> {
                                                            after]);
                     return Ok(Some(res_inp))
                 },
+                MemObj::ConstObj(dl,_,tp,tps) => {
+                    let w_ = dl.type_size_in_bits(tp,tps);
+                    let w = if w_%8==0 {
+                        (w_/8) as usize
+                    } else {
+                        (w_/8+1) as usize
+                    };
+                    if bw_acc+w<=off {
+                        bw_acc+=w;
+                        continue
+                    }
+                    if bw_acc==off && val_sz==w {
+                        self.0[i] = MemObj::ValueObj(val.as_obj());
+                    } else {
+                        unimplemented!()
+                    }
+                    let before = Transformation::view(0,acc,inp_sl.clone());
+                    let after = Transformation::view(acc,
+                                                     inp_sl.size()-acc,
+                                                     inp_sl.clone());
+                    let res_inp = Transformation::concat(&[before,
+                                                           val_inp,
+                                                           after]);
+                    return Ok(Some(res_inp))
+                },
                 _ => {}
             }
             match self.0[i] {
