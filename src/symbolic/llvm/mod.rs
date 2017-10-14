@@ -828,6 +828,46 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
                             }
                         }
                     },
+                    llvm_ir::InstructionC::Select(ref name,ref sel,ref tp,ref if_t,ref if_f) => {
+                        // Update instruction activation
+                        let act_view = call_stack_view.clone()
+                            .then(call_frame_view.clone())
+                            .then(FstView::new())
+                            .then(ActivationView::new());
+                        update_activation(&act_view,&mut nprog,&conds,
+                                          instr_id.next(),
+                                          &mut updates,
+                                          prog_inp.clone(),
+                                          em)?;
+                        let sel_tp = llvm_ir::types::Type::Int(1);
+                        let (rsel,rsel_inp) = translate_value(&m.datalayout,sel,&sel_tp,&m.types,
+                                                              call_frame,call_frame_inp.clone(),
+                                                              exprs,em)?;
+                        let cond = V::to_bool(OptRef::Owned(rsel),rsel_inp)?;
+                        let (rif_t,rif_t_inp) = translate_value(&m.datalayout,if_t,tp,&m.types,
+                                                                call_frame,call_frame_inp.clone(),
+                                                                exprs,em)?;
+                        let (rif_f,rif_f_inp) = translate_value(&m.datalayout,if_f,tp,&m.types,
+                                                                call_frame,call_frame_inp,
+                                                                exprs,em)?;
+                        let (res,res_inp) = ite(OptRef::Owned(rif_t),
+                                                OptRef::Owned(rif_f),
+                                                cond,
+                                                rif_t_inp,
+                                                rif_f_inp,em)?.unwrap();
+                        // Insert the result
+                        let value_view = call_stack_view.clone()
+                            .then(call_frame_view.clone())
+                            .then(FstView::new())
+                            .then(ValuesView::new())
+                            .then(AssocView::new(name));
+                        value_view.insert_cond(&mut nprog,
+                                               res.as_obj(),res_inp,
+                                               &conds,
+                                               &mut updates,
+                                               prog_inp.clone(),
+                                               em)?;
+                    },
                     llvm_ir::InstructionC::GEP(ref name,llvm_ir::GEP {
                         ref ptr,ref indices,..
                     }) => {
