@@ -2592,6 +2592,12 @@ impl IntValue for BitVecValue {
                             let l = em.ite(es[0].clone(),one,zero)?;
                             em.bvslt(l,es[1].clone())
                         }),
+                        &llvm_ir::CmpOp::SLe => Box::new(move |es: &[Em::Expr],em: &mut Em| {
+                            let one = em.const_bitvec(bw,BigUint::from(1 as u8))?;
+                            let zero = em.const_bitvec(bw,BigUint::from(0 as u8))?;
+                            let l = em.ite(es[0].clone(),one,zero)?;
+                            em.bvsle(l,es[1].clone())
+                        }),
                         _ => panic!("ICmp {:?} not implemented",op)
                     };
                     Ok(Transformation::zips_by_elem(f,vec![lhs_inp,rhs_inp]))
