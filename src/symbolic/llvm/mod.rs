@@ -271,6 +271,12 @@ pub trait TranslationCfg<Em : Embed> {
         -> Result<(),Em::Error> {
         Ok(())
     }
+    fn change_instr_not_blocking(
+        &mut self,
+        _:&mut Vec<Transf<Em>>,_:usize,_:&mut Em)
+        -> Result<(),Em::Error> {
+        Ok(())
+    }
 }
 
 pub struct DefaultCfg {}
@@ -588,6 +594,7 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
                                                                      .then(ValuesView::new())
                                                                      .then(AssocView::new(rname)))
                                         };
+                                        let cpos = conds.len();
                                         let implemented = lib.call(name,
                                                                    &targs,targs_inp,
                                                                    ret_view,
@@ -600,6 +607,7 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
                                                                    &mut updates,
                                                                    exprs,
                                                                    em)?;
+                                        cfg.change_instr_not_blocking(&mut conds,cpos,em)?;
                                         if !implemented {
                                             // Create a new call frame
                                             let cfun = m.functions.get(name).expect("Cannot find called function");
