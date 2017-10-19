@@ -234,9 +234,8 @@ pub fn call_frame_get_values<'a,'b,V,Em>(cf: OptRef<'a,CallFrame<'b,V>>,
     let vals_inp = Transformation::view(0,sz,cf_inp);
     (vals,vals_inp)
 }
-                                         
 
-impl<'b,V : Bytes+FromConst<'b>+Clone> Composite for Frame<'b,V> {
+impl<'b,V : HasSorts> HasSorts for Frame<'b,V> {
     fn num_elem(&self) -> usize {
         self.previous.num_elem() +
             self.allocations.num_elem()
@@ -249,6 +248,9 @@ impl<'b,V : Bytes+FromConst<'b>+Clone> Composite for Frame<'b,V> {
         }
         return self.allocations.elem_sort(pos-sz1,em)
     }
+}
+
+impl<'b,V : Bytes+FromConst<'b>+Clone> Composite for Frame<'b,V> {
     fn combine<'a,Em,FComb,FL,FR>(x: OptRef<'a,Self>,y: OptRef<'a,Self>,
                                   inp_x: Transf<Em>,inp_y: Transf<Em>,
                                   comb: &FComb,only_l: &FL,only_r: &FR,em: &mut Em)
@@ -280,7 +282,7 @@ impl<'b,V : Bytes+FromConst<'b>+Clone> Composite for Frame<'b,V> {
     }
 }
 
-impl<'b,V : Composite+FromConst<'b>+Clone> Composite for CallFrame<'b,V> {
+impl<'b,V : HasSorts> HasSorts for CallFrame<'b,V> {
     fn num_elem(&self) -> usize {
         self.values.num_elem() +
             self.arguments.num_elem() +
@@ -303,6 +305,9 @@ impl<'b,V : Composite+FromConst<'b>+Clone> Composite for CallFrame<'b,V> {
         }
         self.phi.elem_sort(pos-off3,em)
     }
+}
+
+impl<'b,V : Composite+FromConst<'b>+Clone> Composite for CallFrame<'b,V> {
     fn combine<'a,Em,FComb,FL,FR>(x: OptRef<'a,Self>,y: OptRef<'a,Self>,
                                   inp_x: Transf<Em>,inp_y: Transf<Em>,
                                   comb: &FComb,only_l: &FL,only_r: &FR,em: &mut Em)

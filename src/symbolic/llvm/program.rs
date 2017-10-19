@@ -393,11 +393,13 @@ fn decompose_program_input<'a,'b,V>(x: OptRef<'a,ProgramInput<'b,V>>)
                               OptRef::Owned(rx.nondet))
     }
 }
-impl<'b,V : Bytes+FromConst<'b>+Clone> Composite for Program<'b,V> {
+
+impl<'b,V : HasSorts> HasSorts for Program<'b,V> {
     fn num_elem(&self) -> usize {
         self.threads.num_elem() +
             self.global.num_elem() +
-            self.heap.num_elem()
+            self.heap.num_elem() +
+            self.aux.num_elem()
     }
     fn elem_sort<Em : Embed>(&self,pos: usize,em: &mut Em)
                              -> Result<Em::Sort,Em::Error> {
@@ -413,6 +415,9 @@ impl<'b,V : Bytes+FromConst<'b>+Clone> Composite for Program<'b,V> {
                         pos < off3 });
         self.heap.elem_sort(pos-off2,em)
     }
+}
+
+impl<'b,V : Bytes+FromConst<'b>+Clone> Composite for Program<'b,V> {
     fn combine<'a,Em,FComb,FL,FR>(x: OptRef<'a,Self>,y: OptRef<'a,Self>,
                                   inp_x: Transf<Em>,inp_y: Transf<Em>,
                                   comb: &FComb,only_l: &FL,only_r: &FR,em: &mut Em)
@@ -457,7 +462,7 @@ impl<'b,V : Bytes+FromConst<'b>+Clone> Composite for Program<'b,V> {
     }
 }
 
-impl<'b,V : Bytes + Clone> Composite for ProgramInput<'b,V> {
+impl<'b,V : HasSorts> HasSorts for ProgramInput<'b,V> {
     fn num_elem(&self) -> usize {
         self.step.num_elem() +
             self.nondet.num_elem()
@@ -472,6 +477,9 @@ impl<'b,V : Bytes + Clone> Composite for ProgramInput<'b,V> {
                         pos < off2 });
         self.nondet.elem_sort(pos-off1,em)
     }
+}
+
+impl<'b,V : Bytes + Clone> Composite for ProgramInput<'b,V> {
     fn combine<'a,Em,FComb,FL,FR>(x: OptRef<'a,Self>,y: OptRef<'a,Self>,
                                   inp_x: Transf<Em>,inp_y: Transf<Em>,
                                   comb: &FComb,only_l: &FL,only_r: &FR,em: &mut Em)

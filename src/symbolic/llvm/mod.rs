@@ -1856,7 +1856,7 @@ impl Semantic for BitVecValue {
     }
 }
 
-impl Composite for BitVecValue {
+impl HasSorts for BitVecValue {
     fn num_elem(&self) -> usize { 1 }
     fn elem_sort<Em : Embed>(&self,n:usize,em: &mut Em)
                              -> Result<Em::Sort,Em::Error> {
@@ -1866,6 +1866,9 @@ impl Composite for BitVecValue {
             BitVecValue::BitVecValue(sz) => em.tp_bitvec(sz)
         }
     }
+}
+
+impl Composite for BitVecValue {
     fn combine<'a,Em,FComb,FL,FR>(x: OptRef<'a,Self>,y: OptRef<'a,Self>,
                                   inp_x: Transf<Em>,inp_y: Transf<Em>,
                                   comb: &FComb,_: &FL,_: &FR,em: &mut Em)
@@ -2739,7 +2742,7 @@ impl Bytes for BitVecValue {
     }
 }*/
 
-impl<Ptr : Composite+Clone,V : Composite+Clone> Composite for CompValue<Ptr,V> {
+impl<Ptr : HasSorts,V : HasSorts> HasSorts for CompValue<Ptr,V> {
     fn num_elem(&self) -> usize {
         match self {
             &CompValue::Value(ref v) => v.num_elem(),
@@ -2755,6 +2758,9 @@ impl<Ptr : Composite+Clone,V : Composite+Clone> Composite for CompValue<Ptr,V> {
             &CompValue::Vector(ref v) => v.elem_sort(n,em)
         }
     }
+}
+
+impl<Ptr : Composite+Clone,V : Composite+Clone> Composite for CompValue<Ptr,V> {
     fn combine<'a,Em,FComb,FL,FR>(x: OptRef<'a,Self>,y: OptRef<'a,Self>,
                                   inp_x: Transf<Em>,inp_y: Transf<Em>,
                                   comb: &FComb,only_l:&FL,only_r:&FR,em: &mut Em)
@@ -3172,7 +3178,7 @@ impl<'a,Ptr : Pointer<'a>+Clone,V : Composite+Clone> Pointer<'a> for CompValue<P
 
 }
 
-impl<C : Composite+Clone> Composite for ByteWidth<C> {
+impl<C : HasSorts> HasSorts for ByteWidth<C> {
     fn num_elem(&self) -> usize {
         self.value.num_elem()
     }
@@ -3180,6 +3186,9 @@ impl<C : Composite+Clone> Composite for ByteWidth<C> {
                              -> Result<Em::Sort,Em::Error> {
         self.value.elem_sort(n,em)
     }
+}
+
+impl<C : Composite+Clone> Composite for ByteWidth<C> {
     fn combine<'a,Em,FComb,FL,FR>(x: OptRef<'a,Self>,y: OptRef<'a,Self>,
                                   inp_x: Transf<Em>,inp_y: Transf<Em>,
                                   comb: &FComb,only_l:&FL,only_r:&FR,em: &mut Em)

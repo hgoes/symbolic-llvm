@@ -365,7 +365,7 @@ impl<'a,V : Bytes+FromConst<'a>> MemObj<'a,V> {
     }
 }
 
-impl<'a,V : Bytes+FromConst<'a>> Composite for MemSlice<'a,V> {
+impl<'a,V : HasSorts> HasSorts for MemSlice<'a,V> {
     fn num_elem(&self) -> usize {
         self.0.iter().map(|obj| match *obj {
             MemObj::FreshObj(_) => 0,
@@ -391,6 +391,9 @@ impl<'a,V : Bytes+FromConst<'a>> Composite for MemSlice<'a,V> {
         }
         panic!("Invalid index: {}",pos)
     }
+}
+
+impl<'a,V : Bytes+FromConst<'a>> Composite for MemSlice<'a,V> {
     fn combine<'b,Em,FComb,FL,FR>(x: OptRef<'b,Self>,y: OptRef<'b,Self>,
                                   inp_x: Transf<Em>,inp_y: Transf<Em>,
                                   comb: &FComb,only_l: &FL,only_r: &FR,em: &mut Em)
@@ -741,7 +744,7 @@ impl<'a,V : Hash> Hash for MemObj<'a,V> {
     }
 }
 
-impl<'a,V : Composite> Composite for MemObj<'a,V> {
+impl<'a,V : HasSorts> HasSorts for MemObj<'a,V> {
     fn num_elem(&self) -> usize {
         match self {
             &MemObj::ValueObj(ref v) => v.num_elem(),
@@ -754,6 +757,9 @@ impl<'a,V : Composite> Composite for MemObj<'a,V> {
             _ => panic!("elem_sort called on empty MemObj")
         }
     }
+}
+
+impl<'a,V : Composite> Composite for MemObj<'a,V> {
     fn combine<'b, Em, FComb, FL, FR>(
         _: OptRef<'b, Self>, 
         _: OptRef<'b, Self>, 

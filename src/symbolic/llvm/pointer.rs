@@ -131,7 +131,7 @@ pub enum PointerTrg<'a> {
     AuxArray
 }
 
-impl<'b> Composite for PointerTrg<'b> {
+impl<'b> HasSorts for PointerTrg<'b> {
     fn num_elem(&self) -> usize {
         match *self {
             PointerTrg::Null => 0,
@@ -162,6 +162,9 @@ impl<'b> Composite for PointerTrg<'b> {
             PointerTrg::AuxArray => unreachable!()
         }
     }
+}
+
+impl<'b> Composite for PointerTrg<'b> {
     fn combine<'a,Em,FComb,FL,FR>(x: OptRef<'a,Self>,y: OptRef<'a,Self>,
                                   inp_x: Transf<Em>,inp_y: Transf<Em>,
                                   comb: &FComb,_: &FL,_: &FR,em: &mut Em)
@@ -381,7 +384,7 @@ pub struct BitField<T> {
     size: Option<usize>
 }
 
-impl<T : Composite> Composite for BitField<T> {
+impl<T : HasSorts> HasSorts for BitField<T> {
     fn num_elem(&self) -> usize {
         match self.size {
             None => self.obj.num_elem(),
@@ -402,6 +405,9 @@ impl<T : Composite> Composite for BitField<T> {
             }
         }
     }
+}
+
+impl<T : Composite> Composite for BitField<T> {
     fn combine<'a, Em, FComb, FL, FR>(
         this: OptRef<'a, Self>, 
         oth: OptRef<'a, Self>, 

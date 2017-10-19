@@ -380,7 +380,7 @@ pub fn decompose_thread<'a,'b,V,Em>(thr: OptRef<'a,Thread<'b,V>>,
     (cs,inp_cs,st,inp_st,top,inp_top,ret,inp_ret)
 }
 
-impl<'b,V : Bytes+FromConst<'b>> Composite for Thread<'b,V> {
+impl<'b,V : HasSorts> HasSorts for Thread<'b,V> {
     fn num_elem(&self) -> usize {
         self.call_stack.num_elem() +
             self.stack.num_elem() +
@@ -405,6 +405,9 @@ impl<'b,V : Bytes+FromConst<'b>> Composite for Thread<'b,V> {
                         pos<off4 });
         self.ret.elem_sort(pos-off3,em)
     }
+}
+
+impl<'b,V : Bytes+FromConst<'b>> Composite for Thread<'b,V> {
     fn combine<'a,Em,FComb,FL,FR>(x: OptRef<'a,Self>,y: OptRef<'a,Self>,
                                   inp_x: Transf<Em>,inp_y: Transf<Em>,
                                   comb: &FComb,only_l: &FL,only_r: &FR,em: &mut Em)
