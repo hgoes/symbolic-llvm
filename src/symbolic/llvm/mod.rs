@@ -298,7 +298,7 @@ fn eval_phi<'b,ValsView,V,Em>(m: &'b Module,
                               exprs: &[Em::Expr],
                               em: &mut Em) -> Result<(),Em::Error>
     where ValsView : ViewMut<Viewed=Program<'b,V>,Element=Assoc<&'b String,V>>+Clone,
-          V : 'b+Bytes+FromConst<'b>+IntValue+Vector+Pointer<'b>+Debug,
+          V : 'b+Bytes+FromConst<'b>+IntValue+Vector+Pointer<'b>+FromMD<'b>+Debug,
           Em : DeriveValues {
     let trg_blk = match m.functions.get(fun) {
         None => panic!("Function not found"),
@@ -350,7 +350,7 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
     em: &mut Em)
     -> Result<(Program<'b,V>,
                Transf<Em>),TrErr<'b,V,Em::Error>>
-    where V : 'b+Bytes+FromConst<'b>+IntValue+Vector+Pointer<'b>+Debug,
+    where V : 'b+Bytes+FromConst<'b>+IntValue+Vector+Pointer<'b>+FromMD<'b>+Debug,
           Cfg : TranslationCfg<Em>,
           Lib : Library<'b,V,Em>,
           Em : DeriveValues {
@@ -541,7 +541,6 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
                                           em)?;
                     },
                     llvm_ir::InstructionC::Call(ref ret,_,ref ret_tp,ref called,ref args,_) => {
-                        //println!("CALL!");
                         // Create the function type of the call
                         let arg_tps = args.iter().map(|v| v.tp.clone()).collect();
                         let ftp = llvm_ir::types::Type::Function(match ret_tp {
@@ -573,126 +572,122 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
                         while let Some(trg_view) = trgs.next(&mut conds,cpos,em)? {
                             let (trg,trg_inp) = trg_view.get_with_inp(base.as_ref(),base_inp.clone());
                             match trg {
-                                &(PointerTrg::Global(name),_) => match name.as_ref() {
-                                    "llvm.dbg.value" => { /* ignore */ },
-                                    "llvm.dbg.declare" => { /* ignore */ },
-                                    _ => {
-                                        let mut targs = Vec::with_capacity(args.len());
-                                        let mut targs_inp_ = Vec::with_capacity(args.len());
-                                        for arg in args.iter() {
-                                            let (targ,targ_inp) = translate_value(&m.datalayout,&arg.val,&arg.tp,&m.types,
-                                                                                  call_frame,call_frame_inp.clone(),
-                                                                                  exprs,em)?;
-                                            targs.push(targ);
-                                            targs_inp_.push(targ_inp);
-                                        }
-                                        let targs_inp = Transformation::concat(&targs_inp_[..]);
-                                        let ret_view = match ret {
-                                            &None => None,
-                                            &Some(ref rname) => Some(call_stack_view.clone()
-                                                                     .then(call_frame_view.clone())
-                                                                     .then(FstView::new())
-                                                                     .then(ValuesView::new())
-                                                                     .then(AssocView::new(rname)))
+                                &(PointerTrg::Global(name),_) => {
+                                    let mut targs = Vec::with_capacity(args.len());
+                                    let mut targs_inp_ = Vec::with_capacity(args.len());
+                                    for arg in args.iter() {
+                                        let (targ,targ_inp) = translate_value(&m.datalayout,&arg.val,&arg.tp,&m.types,
+                                                                              call_frame,call_frame_inp.clone(),
+                                                                              exprs,em)?;
+                                        targs.push(targ);
+                                        targs_inp_.push(targ_inp);
+                                    }
+                                    let targs_inp = Transformation::concat(&targs_inp_[..]);
+                                    let ret_view = match ret {
+                                        &None => None,
+                                        &Some(ref rname) => Some(call_stack_view.clone()
+                                                                 .then(call_frame_view.clone())
+                                                                 .then(FstView::new())
+                                                                 .then(ValuesView::new())
+                                                                 .then(AssocView::new(rname)))
+                                    };
+                                    let cpos = conds.len();
+                                    let implemented = lib.call(name,
+                                                               &targs,targs_inp,
+                                                               ret_view,
+                                                               &m.datalayout,
+                                                               instr_id,
+                                                               &mut conds,
+                                                               &prog,
+                                                               prog_inp.clone(),
+                                                               &mut nprog,
+                                                               &mut updates,
+                                                               exprs,
+                                                               em)?;
+                                    cfg.change_instr_not_blocking(&mut conds,cpos,em)?;
+                                    if !implemented {
+                                        // Create a new call frame
+                                        let cfun = m.functions.get(name).expect("Cannot find called function");
+                                        let cblk = match cfun.body {
+                                            None => panic!("Called function has no body: {}",cfun.name),
+                                            Some(ref bdy) => &bdy[0].name
                                         };
-                                        let cpos = conds.len();
-                                        let implemented = lib.call(name,
-                                                                   &targs,targs_inp,
-                                                                   ret_view,
-                                                                   &m.datalayout,
-                                                                   instr_id,
-                                                                   &mut conds,
-                                                                   &prog,
-                                                                   prog_inp.clone(),
-                                                                   &mut nprog,
-                                                                   &mut updates,
-                                                                   exprs,
-                                                                   em)?;
-                                        cfg.change_instr_not_blocking(&mut conds,cpos,em)?;
-                                        if !implemented {
-                                            // Create a new call frame
-                                            let cfun = m.functions.get(name).expect("Cannot find called function");
-                                            let cblk = match cfun.body {
-                                                None => panic!("Called function has no body: {}",cfun.name),
-                                                Some(ref bdy) => &bdy[0].name
-                                            };
-                                            let nxt_instr = InstructionRef { function: &cfun.name,
-                                                                             basic_block: cblk,
-                                                                             instruction: 0 };
-                                            let (vals,vals_inp) = assoc_empty()?;
-                                            let mut arg_vals = Vec::with_capacity(args.len());
-                                            let mut arg_vals_inp_ = Vec::with_capacity(args.len());
-                                            for arg in args.iter() {
-                                                let (rarg,rarg_inp) = translate_value(&m.datalayout,&arg.val,&arg.tp,
-                                                                                      &m.types,
-                                                                                      call_frame,
-                                                                                      call_frame_inp.clone(),
-                                                                                      exprs,em)?;
-                                                arg_vals.push(rarg);
-                                                arg_vals_inp_.push(rarg_inp);
-                                            }
-                                            let arg_vals_inp = Transformation::concat(&arg_vals_inp_[..]);
-                                            let (act0,act0_inp) = choice_empty();
-                                            let (act,act_inp) = choice_insert(OptRef::Owned(act0),act0_inp,
-                                                                              Transformation::const_bool(true,em)?,
-                                                                              OptRef::Owned(Data(nxt_instr)),
-                                                                              Transformation::id(0))?;
-                                            let (phi,phi_inp) = choice_empty();
-                                            let cf = CallFrame { values: vals.as_obj(),
-                                                                 arguments: arg_vals,
-                                                                 activation: act.as_obj(),
-                                                                 phi: phi };
+                                        let nxt_instr = InstructionRef { function: &cfun.name,
+                                                                         basic_block: cblk,
+                                                                         instruction: 0 };
+                                        let (vals,vals_inp) = assoc_empty()?;
+                                        let mut arg_vals = Vec::with_capacity(args.len());
+                                        let mut arg_vals_inp_ = Vec::with_capacity(args.len());
+                                        for arg in args.iter() {
+                                            let (rarg,rarg_inp) = translate_value(&m.datalayout,&arg.val,&arg.tp,
+                                                                                  &m.types,
+                                                                                  call_frame,
+                                                                                  call_frame_inp.clone(),
+                                                                                  exprs,em)?;
+                                            arg_vals.push(rarg);
+                                            arg_vals_inp_.push(rarg_inp);
+                                        }
+                                        let arg_vals_inp = Transformation::concat(&arg_vals_inp_[..]);
+                                        let (act0,act0_inp) = choice_empty();
+                                        let (act,act_inp) = choice_insert(OptRef::Owned(act0),act0_inp,
+                                                                          Transformation::const_bool(true,em)?,
+                                                                          OptRef::Owned(Data(nxt_instr)),
+                                                                          Transformation::id(0))?;
+                                        let (phi,phi_inp) = choice_empty();
+                                        let cf = CallFrame { values: vals.as_obj(),
+                                                             arguments: arg_vals,
+                                                             activation: act.as_obj(),
+                                                             phi: phi };
                                             
-                                            let (prev_,prev_inp_) = choice_empty();
-                                            let (prev,prev_inp) = choice_insert(OptRef::Owned(prev_),prev_inp_,
-                                                                                Transformation::const_bool(true,em)?,
-                                                                                OptRef::Owned(Data(context_id.clone())),
-                                                                                Transformation::id(0))?;
-                                            let (allocs,allocs_inp) = assoc_empty()?;
-                                            let fr = Frame { previous: prev.as_obj(),
-                                                             allocations: allocs.as_obj() };
-                                            let cf_fr_inp = Transformation::concat(&[vals_inp,
-                                                                                     arg_vals_inp,
-                                                                                     act_inp,
-                                                                                     phi_inp,
-                                                                                     prev_inp,
-                                                                                     allocs_inp]);
-                                            // Insert the call frame
-                                            let ncall_id = (Some(instr_id),name);
-                                            let ncall_stack_view = thread_view.clone()
-                                                .then(CallStackView::new())
-                                                .then(AssocView::new(ncall_id));
-                                            let (cur_cs_,cur_cs_inp)
-                                                = match ncall_stack_view.get_opt_with_inp(prog,prog_inp.clone()) {
-                                                    None => {
-                                                        let (st,st_inp) = bv_vec_stack_empty(INDEX_WIDTH,em)?;
-                                                        (OptRef::Owned(st),st_inp)
-                                                    },
-                                                    Some((r,inp)) => (OptRef::Ref(r),inp)
-                                                };
-                                            let mut cur_cs = cur_cs_.as_obj();
-                                            let ncur_cs_inp = cur_cs.push_cond(cur_cs_inp,
-                                                                               (cf,fr),cf_fr_inp,
-                                                                               &mut conds,
-                                                                               exprs,em)?;
-                                            ncall_stack_view.insert(&mut nprog,cur_cs,ncur_cs_inp,&mut updates);
-                                            // Update the stack top
-                                            let (rstack_top,rstack_top_inp,rcond) = if conds.len()==0 {
-                                                let c = em.const_bool(true)?;
-                                                let (st,st_inp) = choice_empty();
-                                                (OptRef::Owned(st),st_inp,Transformation::constant(vec![c]))
-                                            } else {
-                                                let c = Transformation::and(conds.to_vec());
-                                                (OptRef::Ref(stack_top),stack_top_inp.clone(),c)
+                                        let (prev_,prev_inp_) = choice_empty();
+                                        let (prev,prev_inp) = choice_insert(OptRef::Owned(prev_),prev_inp_,
+                                                                            Transformation::const_bool(true,em)?,
+                                                                            OptRef::Owned(Data(context_id.clone())),
+                                                                            Transformation::id(0))?;
+                                        let (allocs,allocs_inp) = assoc_empty()?;
+                                        let fr = Frame { previous: prev.as_obj(),
+                                                         allocations: allocs.as_obj() };
+                                        let cf_fr_inp = Transformation::concat(&[vals_inp,
+                                                                                 arg_vals_inp,
+                                                                                 act_inp,
+                                                                                 phi_inp,
+                                                                                 prev_inp,
+                                                                                 allocs_inp]);
+                                        // Insert the call frame
+                                        let ncall_id = (Some(instr_id),name);
+                                        let ncall_stack_view = thread_view.clone()
+                                            .then(CallStackView::new())
+                                            .then(AssocView::new(ncall_id));
+                                        let (cur_cs_,cur_cs_inp)
+                                            = match ncall_stack_view.get_opt_with_inp(prog,prog_inp.clone()) {
+                                                None => {
+                                                    let (st,st_inp) = bv_vec_stack_empty(INDEX_WIDTH,em)?;
+                                                    (OptRef::Owned(st),st_inp)
+                                                },
+                                                Some((r,inp)) => (OptRef::Ref(r),inp)
                                             };
+                                        let mut cur_cs = cur_cs_.as_obj();
+                                        let ncur_cs_inp = cur_cs.push_cond(cur_cs_inp,
+                                                                           (cf,fr),cf_fr_inp,
+                                                                           &mut conds,
+                                                                           exprs,em)?;
+                                        ncall_stack_view.insert(&mut nprog,cur_cs,ncur_cs_inp,&mut updates);
+                                        // Update the stack top
+                                        let (rstack_top,rstack_top_inp,rcond) = if conds.len()==0 {
+                                            let c = em.const_bool(true)?;
+                                            let (st,st_inp) = choice_empty();
+                                            (OptRef::Owned(st),st_inp,Transformation::constant(vec![c]))
+                                        } else {
+                                            let c = Transformation::and(conds.to_vec());
+                                            (OptRef::Ref(stack_top),stack_top_inp.clone(),c)
+                                        };
                                             let (nstack_top,nstack_top_inp)
-                                                = choice_set_chosen(rstack_top,rstack_top_inp.clone(),
-                                                                    rcond,
-                                                                    OptRef::Owned(Data(Some(ContextId::Call(ncall_id)))),
-                                                                    Transformation::id(0))?;
+                                            = choice_set_chosen(rstack_top,rstack_top_inp.clone(),
+                                                                rcond,
+                                                                OptRef::Owned(Data(Some(ContextId::Call(ncall_id)))),
+                                                                Transformation::id(0))?;
                                             stack_top_view.write(nstack_top.as_obj(),nstack_top_inp,
                                                                  &mut nprog,&mut updates);
-                                        }
                                     }
                                 },
                                 _ => panic!("Called object not a function")
@@ -1396,7 +1391,7 @@ pub fn translate_value<'b,V,Em>(dl: &'b DataLayout,
                                 _: &[Em::Expr],
                                 em: &mut Em)
                                 -> Result<(V,Transf<Em>),Em::Error>
-    where V : 'b+Bytes+FromConst<'b>+Pointer<'b>+IntValue+Vector+Clone,Em : DeriveValues {
+    where V : 'b+Bytes+FromConst<'b>+Pointer<'b>+IntValue+Vector+FromMD<'b>+Clone,Em : DeriveValues {
     match value {
         &llvm_ir::Value::Constant(ref c) => {
             let (obj,els) = translate_constant(dl,c,tp,tps,em)?;
@@ -1412,6 +1407,7 @@ pub fn translate_value<'b,V,Em>(dl: &'b DataLayout,
             let (val,val_inp) = val_view.get_with_inp(cf,cf_inp);
             Ok((val.clone(),val_inp))
         },
+        &llvm_ir::Value::Metadata(ref md) => V::from_md(md),
         _ => panic!("Translate value: {:#?}",value)
     }
 }
@@ -1618,6 +1614,11 @@ pub trait IntValue : Composite {
                                   -> (Self,Transf<Em>);
 }
 
+pub trait FromMD<'a> : Composite {
+    fn from_md<Em : Embed>(&'a llvm_ir::Metadata)
+                           -> Result<(Self,Transf<Em>),Em::Error>;
+}
+
 /*pub trait Pointer<'a> : Composite {
     fn null<Em : Embed>(u64,&mut Em) -> Result<(Self,Vec<Em::Expr>),Em::Error>;
     fn global<Em : Embed>(u64,&'a String,&mut Em) -> Result<(Self,Vec<Em::Expr>),Em::Error>;
@@ -1636,7 +1637,8 @@ pub trait Vector : Composite {
 pub enum CompValue<Ptr,V> {
     Value(V),
     Pointer(BitField<Ptr>),
-    Vector(Vec<CompValue<Ptr,V>>)
+    Vector(Vec<CompValue<Ptr,V>>),
+    Metadata
 }
 
 pub enum CompValueMeaning<Ptr : Semantic+HasSorts,V : Semantic> {
@@ -1744,7 +1746,8 @@ impl<Ptr : Semantic+HasSorts,V : Semantic+HasSorts> Semantic for CompValue<Ptr,V
         match self {
             &CompValue::Value(ref v) => CompValueMeaning::Value(v.meaning(pos)),
             &CompValue::Pointer(ref p) => CompValueMeaning::Pointer(p.meaning(pos)),
-            &CompValue::Vector(ref v) => CompValueMeaning::Vector(Box::new(v.meaning(pos)))
+            &CompValue::Vector(ref v) => CompValueMeaning::Vector(Box::new(v.meaning(pos))),
+            &CompValue::Metadata => unreachable!()
         }
     }
     fn fmt_meaning<F : fmt::Write>(&self,m: &Self::Meaning,fmt: &mut F) -> Result<(),fmt::Error> {
@@ -1788,7 +1791,8 @@ impl<Ptr : Semantic+HasSorts,V : Semantic+HasSorts> Semantic for CompValue<Ptr,V
                 None => None,
                 Some((ctx,m)) => Some((CompValueMeaningCtx::Vector(Box::new(ctx)),
                                        CompValueMeaning::Vector(Box::new(m))))
-            }
+            },
+            &CompValue::Metadata => None
         }
     }
     fn next_meaning(&self,ctx: &mut Self::MeaningCtx,
@@ -1814,7 +1818,8 @@ impl<Ptr : Semantic+HasSorts,V : Semantic+HasSorts> Semantic for CompValue<Ptr,V
                     _ => unreachable!()
                 },
                 _ => unreachable!()
-            }
+            },
+            &CompValue::Metadata => unreachable!()
         }
     }
 }
@@ -2757,7 +2762,8 @@ impl<Ptr : HasSorts,V : HasSorts> HasSorts for CompValue<Ptr,V> {
         match self {
             &CompValue::Value(ref v) => v.num_elem(),
             &CompValue::Pointer(ref p) => p.num_elem(),
-            &CompValue::Vector(ref v) => v.num_elem()
+            &CompValue::Vector(ref v) => v.num_elem(),
+            &CompValue::Metadata => 0
         }
     }
     fn elem_sort<Em : Embed>(&self,n:usize,em: &mut Em)
@@ -2765,7 +2771,8 @@ impl<Ptr : HasSorts,V : HasSorts> HasSorts for CompValue<Ptr,V> {
         match self {
             &CompValue::Value(ref v) => v.elem_sort(n,em),
             &CompValue::Pointer(ref p) => p.elem_sort(n,em),
-            &CompValue::Vector(ref v) => v.elem_sort(n,em)
+            &CompValue::Vector(ref v) => v.elem_sort(n,em),
+            &CompValue::Metadata => unreachable!()
         }
     }
 }
@@ -2870,8 +2877,28 @@ impl<Ptr : Composite+Clone,V : Composite+Clone> Composite for CompValue<Ptr,V> {
                     None => Ok(None),
                     Some((nv,inp_nv)) => Ok(Some((OptRef::Owned(CompValue::Vector(nv.as_obj())),inp_nv)))
                 }
+            },
+            OptRef::Ref(&CompValue::Metadata) => {
+                match y {
+                    OptRef::Ref(&CompValue::Metadata) => Ok(Some((OptRef::Owned(CompValue::Metadata),inp_x))),
+                    OptRef::Owned(CompValue::Metadata) => Ok(Some((OptRef::Owned(CompValue::Metadata),inp_x))),
+                    _ => Ok(None)
+                }
+            },
+            OptRef::Owned(CompValue::Metadata) => {
+                match y {
+                    OptRef::Ref(&CompValue::Metadata) => Ok(Some((OptRef::Owned(CompValue::Metadata),inp_x))),
+                    OptRef::Owned(CompValue::Metadata) => Ok(Some((OptRef::Owned(CompValue::Metadata),inp_x))),
+                    _ => Ok(None)
+                }
             }
         }
+    }
+}
+
+impl<'a,Ptr : Composite,V : Composite> FromMD<'a> for CompValue<Ptr,V> {
+    fn from_md<Em : Embed>(_:&'a llvm_ir::Metadata) -> Result<(Self,Transf<Em>),Em::Error> {
+        Ok((CompValue::Metadata,Transformation::id(0)))
     }
 }
 
@@ -2958,7 +2985,8 @@ impl<'c,Ptr : Pointer<'c>+Bytes+Clone,V : IntValue+Bytes+Clone> IntValue for Com
             },
             &CompValue::Vector(_) => {
                 unimplemented!()
-            }
+            },
+            &CompValue::Metadata => unimplemented!()
         }
     }
     fn sext<'a,Em>(x: OptRef<'a,Self>,inp: Transf<Em>,sz: usize,em: &mut Em)
@@ -3067,7 +3095,8 @@ impl<Ptr : Bytes+Clone,V : Bytes+Clone> Bytes for CompValue<Ptr,V> {
                     acc+=el.byte_width()
                 }
                 acc
-            }
+            },
+            &CompValue::Metadata => unimplemented!()
         }
     }
     fn extract_bytes<'a,Em : Embed>(x: OptRef<'a,Self>,
@@ -3136,7 +3165,8 @@ impl<Ptr : Bytes+Clone,V : Bytes+Clone> Bytes for CompValue<Ptr,V> {
                     off+=nel;
                 }
                 Ok(None)
-            }
+            },
+            _ => unimplemented!()
         }
     }
 }

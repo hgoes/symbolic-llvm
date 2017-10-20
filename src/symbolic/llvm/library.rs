@@ -86,8 +86,8 @@ impl<'a,V : 'a+Bytes+FromConst<'a>+IntValue+Pointer<'a>+Debug,Em : DeriveValues>
                     Transformation::and(conds.to_vec())
                 };
                 let (ptr_,ptr_inp_) = choice_empty();
-                                        let (ptr,ptr_inp) = choice_insert(OptRef::Owned(ptr_),ptr_inp_,rcond.clone(),
-                                                                          OptRef::Owned((trg,(Data((stat_sz,0)),None))),trg_inp)?;
+                let (ptr,ptr_inp) = choice_insert(OptRef::Owned(ptr_),ptr_inp_,rcond.clone(),
+                                                  OptRef::Owned((trg,(Data((stat_sz,0)),None))),trg_inp)?;
                 // Insert the pointer
                 let rret = match ret_view {
                     None => panic!("malloc without return"),
@@ -148,6 +148,9 @@ impl<'a,V : 'a+Bytes+FromConst<'a>+IntValue+Pointer<'a>+Debug,Em : DeriveValues>
                     }
                 }
                 conds.truncate(cpos);
+                Ok(true)
+            },
+            x if x.starts_with("llvm.dbg.") => {
                 Ok(true)
             },
             x if x.starts_with("llvm.expect.") => {
