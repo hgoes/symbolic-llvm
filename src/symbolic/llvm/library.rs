@@ -5,46 +5,46 @@ use super::mem::*;
 use super::pointer::*;
 use super::{InstructionRef,INDEX_WIDTH,IntValue};
 use smtrs::composite::*;
-use smtrs::embed::{DeriveValues};
+use smtrs::embed::{Embed,DeriveValues};
 use smtrs::types::{Value};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use llvm_ir::datalayout::DataLayout;
 use std::fmt::Debug;
 
-pub trait Library<'a,V : 'a+Bytes+FromConst<'a>> {
-    fn call<RetV,Em : DeriveValues>(&self,
-                                    &'a String,
-                                    &Vec<V>,Transf<Em>,
-                                    Option<RetV>,
-                                    &'a DataLayout,
-                                    InstructionRef<'a>,
-                                    &mut Vec<Transf<Em>>,
-                                    &Program<'a,V>,Transf<Em>,
-                                    &mut Program<'a,V>,&mut Updates<Em>,
-                                    &[Em::Expr],&mut Em)
-                                    -> Result<bool,Em::Error>
+pub trait Library<'a,V : 'a+Bytes+FromConst<'a>,Em : Embed> {
+    fn call<RetV>(&self,
+                  &'a String,
+                  &Vec<V>,Transf<Em>,
+                  Option<RetV>,
+                  &'a DataLayout,
+                  InstructionRef<'a>,
+                  &mut Vec<Transf<Em>>,
+                  &Program<'a,V>,Transf<Em>,
+                  &mut Program<'a,V>,&mut Updates<Em>,
+                  &[Em::Expr],&mut Em)
+                  -> Result<bool,Em::Error>
         where RetV : ViewInsert<Viewed=Program<'a,V>,Element=V>+ViewMut;
 }
 
 pub struct StdLib {}
 
-impl<'a,V : 'a+Bytes+FromConst<'a>+IntValue+Pointer<'a>+Debug> Library<'a,V> for StdLib {
-    fn call<RetV,Em : DeriveValues>(&self,
-                                    name: &'a String,
-                                    args: &Vec<V>,
-                                    args_inp: Transf<Em>,
-                                    ret_view: Option<RetV>,
-                                    dl: &'a DataLayout,
-                                    instr_id: InstructionRef<'a>,
-                                    conds: &mut Vec<Transf<Em>>,
-                                    prog: &Program<'a,V>,
-                                    prog_inp: Transf<Em>,
-                                    nprog: &mut Program<'a,V>,
-                                    updates: &mut Updates<Em>,
-                                    exprs: &[Em::Expr],
-                                    em: &mut Em)
-                                    -> Result<bool,Em::Error>
+impl<'a,V : 'a+Bytes+FromConst<'a>+IntValue+Pointer<'a>+Debug,Em : DeriveValues> Library<'a,V,Em> for StdLib {
+    fn call<RetV>(&self,
+                  name: &'a String,
+                  args: &Vec<V>,
+                  args_inp: Transf<Em>,
+                  ret_view: Option<RetV>,
+                  dl: &'a DataLayout,
+                  instr_id: InstructionRef<'a>,
+                  conds: &mut Vec<Transf<Em>>,
+                  prog: &Program<'a,V>,
+                  prog_inp: Transf<Em>,
+                  nprog: &mut Program<'a,V>,
+                  updates: &mut Updates<Em>,
+                  exprs: &[Em::Expr],
+                  em: &mut Em)
+                  -> Result<bool,Em::Error>
         where RetV : ViewInsert<Viewed=Program<'a,V>,Element=V>+ViewMut {
         match name.as_ref() {
             "malloc" => {

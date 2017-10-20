@@ -91,7 +91,8 @@ pub fn translate_init<'a,'b,V,Em>(module: &'a Module,
                                   entry_fun: &'a String,
                                   args: Vec<V>,
                                   inp_args: Transf<Em>,
-                                  aux: Vec<Vec<u8>>,
+                                  aux: Aux,
+                                  aux_inp: Transf<Em>,
                                   em: &mut Em)
                                   -> Result<(OptRef<'b,Program<'a,V>>,Transf<Em>),Em::Error>
     where V : Bytes+FromConst<'a>+Clone, Em : Embed {
@@ -183,7 +184,7 @@ pub fn translate_init<'a,'b,V,Em>(module: &'a Module,
 
     let (heap,inp_heap) = assoc_empty()?;
     
-    Ok(program(threads,inp_threads,globals,inp_globals,heap,inp_heap,OptRef::Owned(aux)))
+    Ok(program(threads,inp_threads,globals,inp_globals,heap,inp_heap,OptRef::Owned(aux),aux_inp))
 }
 
 fn filter_ctx_id<'a,V>(cf_id: &CallId<'a>,el: (ThreadView<'a,V>,&Data<Option<ContextId<'a>>>))
@@ -351,7 +352,7 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
                Transf<Em>),TrErr<'b,V,Em::Error>>
     where V : 'b+Bytes+FromConst<'b>+IntValue+Vector+Pointer<'b>+Debug,
           Cfg : TranslationCfg<Em>,
-          Lib : Library<'b,V>,
+          Lib : Library<'b,V,Em>,
           Em : DeriveValues {
     debug_assert_eq!(prog.num_elem(),prog_inp.size());
     debug_assert_eq!(inp.num_elem(),inp_inp.size());
@@ -947,7 +948,7 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
                                     let (off,off_inp) = V::to_offset(OptRef::Owned(i),i_inp);
                                     let off_e = off_inp.get(exprs,0,em)?;
                                     match em.derive_const(&off_e)? {
-                                        None => panic!("Dynamic GEP"),//idx.push((Some((off,off_inp)),sz as usize)),
+                                        None => idx.push((Some((off,off_inp)),sz as usize)),
                                         Some(off_c) => idx.push((None,value_as_index(&off_c)*(sz as usize)))
                                     };
                                     el_tp
@@ -1638,20 +1639,29 @@ pub enum CompValue<Ptr,V> {
     Vector(Vec<CompValue<Ptr,V>>)
 }
 
-#[derive(Clone)]
-pub enum CompValueMeaning<Ptr : Semantic,V : Semantic> {
+pub enum CompValueMeaning<Ptr : Semantic+HasSorts,V : Semantic> {
     Value(V::Meaning),
     Pointer(<BitField<Ptr> as Semantic>::Meaning),
     Vector(Box<VecMeaning<CompValueMeaning<Ptr,V>>>)
 }
 
-pub enum CompValueMeaningCtx<Ptr : Semantic,V : Semantic> {
+pub enum CompValueMeaningCtx<Ptr : Semantic+HasSorts,V : Semantic> {
     Value(V::MeaningCtx),
     Pointer(<BitField<Ptr> as Semantic>::MeaningCtx),
     Vector(Box<CompValueMeaningCtx<Ptr,V>>)
 }
 
-impl<V : Semantic,U : Semantic> PartialEq for CompValueMeaning<V,U> {
+impl<Ptr : Semantic+HasSorts,V : Semantic> Clone for CompValueMeaning<Ptr,V> {
+    fn clone(&self) -> Self {
+        match self {
+            &CompValueMeaning::Value(ref m) => CompValueMeaning::Value(m.clone()),
+            &CompValueMeaning::Pointer(ref p) => CompValueMeaning::Pointer(p.clone()),
+            &CompValueMeaning::Vector(ref v) => CompValueMeaning::Vector(v.clone())
+        }
+    }
+}
+
+impl<V : Semantic+HasSorts,U : Semantic> PartialEq for CompValueMeaning<V,U> {
     fn eq(&self,other: &CompValueMeaning<V,U>) -> bool {
         match self {
             &CompValueMeaning::Value(ref p) => match other {
@@ -1670,15 +1680,15 @@ impl<V : Semantic,U : Semantic> PartialEq for CompValueMeaning<V,U> {
     }
 }
 
-impl<V : Semantic,U : Semantic> Eq for CompValueMeaning<V,U> {}
+impl<V : Semantic+HasSorts,U : Semantic> Eq for CompValueMeaning<V,U> {}
 
-impl<V : Semantic,U : Semantic> PartialOrd for CompValueMeaning<V,U> {
+impl<V : Semantic+HasSorts,U : Semantic> PartialOrd for CompValueMeaning<V,U> {
     fn partial_cmp(&self,other: &CompValueMeaning<V,U>) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<V : Semantic,U : Semantic> Ord for CompValueMeaning<V,U> {
+impl<V : Semantic+HasSorts,U : Semantic> Ord for CompValueMeaning<V,U> {
     fn cmp(&self,other: &CompValueMeaning<V,U>) -> Ordering {
         match (self,other) {
             (&CompValueMeaning::Value(ref p),
@@ -1695,7 +1705,7 @@ impl<V : Semantic,U : Semantic> Ord for CompValueMeaning<V,U> {
     }
 }
 
-impl<V : Semantic,U : Semantic> Hash for CompValueMeaning<V,U> {
+impl<V : Semantic+HasSorts,U : Semantic> Hash for CompValueMeaning<V,U> {
     fn hash<H>(&self, state: &mut H) where H: Hasher {
         match self {
             &CompValueMeaning::Value(ref p) => {
@@ -1714,7 +1724,7 @@ impl<V : Semantic,U : Semantic> Hash for CompValueMeaning<V,U> {
     }
 }
 
-impl<V : Semantic,U : Semantic> fmt::Debug for CompValueMeaning<V,U> {
+impl<V : Semantic+HasSorts,U : Semantic> fmt::Debug for CompValueMeaning<V,U> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         match self {
             &CompValueMeaning::Value(ref p) => f.debug_tuple("Value")
@@ -1727,7 +1737,7 @@ impl<V : Semantic,U : Semantic> fmt::Debug for CompValueMeaning<V,U> {
     }
 }
 
-impl<Ptr : Semantic,V : Semantic> Semantic for CompValue<Ptr,V> {
+impl<Ptr : Semantic+HasSorts,V : Semantic+HasSorts> Semantic for CompValue<Ptr,V> {
     type Meaning = CompValueMeaning<Ptr,V>;
     type MeaningCtx = CompValueMeaningCtx<Ptr,V>;
     fn meaning(&self,pos: usize) -> Self::Meaning {

@@ -492,7 +492,7 @@ pub enum BitFieldMeaning<M> {
     Field
 }
 
-impl<T : Semantic> Semantic for BitField<T> {
+impl<T : Semantic+HasSorts> Semantic for BitField<T> {
     type Meaning = BitFieldMeaning<T::Meaning>;
     type MeaningCtx = BitFieldMeaning<T::MeaningCtx>;
     fn meaning(&self,pos: usize) -> Self::Meaning {

@@ -29,6 +29,8 @@ pub type Globals<'a,V> = Assoc<&'a String,MemSlice<'a,V>>;
 
 pub type Heap<'a,V> = Assoc<InstructionRef<'a>,Vec<MemSlice<'a,V>>>;
 
+pub type Aux = Choice<Data<Vec<Vec<u8>>>>;
+
 pub type Step<'a> = Choice<(Data<ThreadId<'a>>,
                             SingletonBitVec)>;
 
@@ -39,7 +41,7 @@ pub struct Program<'a,V> {
     pub threads: Threads<'a,V>,
     pub global: Globals<'a,V>,
     pub heap: Heap<'a,V>,
-    pub aux: Vec<Vec<u8>>
+    pub aux: Aux
 }
 
 #[derive(PartialEq,Eq,Hash,Clone,Debug)]
@@ -121,7 +123,7 @@ impl<'a,V : Bytes+FromConst<'a>> Program<'a,V> {
         Program { threads: Assoc::new(),
                   global: Assoc::new(),
                   heap: Assoc::new(),
-                  aux: Vec::new() }
+                  aux: Choice::new() }
     }
     pub fn is_single_threaded(&self) -> bool {
         match self.threads.is_single() {
@@ -320,18 +322,20 @@ pub fn program<'a,'b,'c,V,Em>(thrs: OptRef<'a,Threads<'b,V>>,
                               inp_glob: Transf<Em>,
                               heap: OptRef<'a,Heap<'b,V>>,
                               inp_heap: Transf<Em>,
-                              aux: OptRef<'a,Vec<Vec<u8>>>)
+                              aux: OptRef<'a,Aux>,
+                              inp_aux: Transf<Em>)
                               -> (OptRef<'c,Program<'b,V>>,Transf<Em>)
     where V : Bytes+FromConst<'b>+Clone,Em : Embed {
     debug_assert_eq!(thrs.as_ref().num_elem(),inp_thrs.size());
     debug_assert_eq!(glob.as_ref().num_elem(),inp_glob.size());
     debug_assert_eq!(heap.as_ref().num_elem(),inp_heap.size());
+    debug_assert_eq!(aux.as_ref().num_elem(),inp_aux.size());
 
     let prog = Program { threads: thrs.as_obj(),
                          global: glob.as_obj(),
                          heap: heap.as_obj(),
                          aux: aux.as_obj() };
-    let prog_inp = Transformation::concat(&[inp_thrs,inp_glob,inp_heap]);
+    let prog_inp = Transformation::concat(&[inp_thrs,inp_glob,inp_heap,inp_aux]);
     (OptRef::Owned(prog),prog_inp)
 }
 
@@ -358,7 +362,8 @@ pub fn decompose_program<'a,'b,V,Em>(prog: OptRef<'a,Program<'b,V>>,
                                          Transf<Em>,
                                          OptRef<'a,Heap<'b,V>>,
                                          Transf<Em>,
-                                         OptRef<'a,Vec<Vec<u8>>>)
+                                         OptRef<'a,Aux>,
+                                         Transf<Em>)
     where V : Bytes+FromConst<'b>+Clone,Em : Embed {
     let (thrs,glob,hp,aux) = match prog {
         OptRef::Ref(ref prog)
@@ -375,10 +380,12 @@ pub fn decompose_program<'a,'b,V,Em>(prog: OptRef<'a,Program<'b,V>>,
     let sz_thrs = thrs.as_ref().num_elem();
     let sz_glob = glob.as_ref().num_elem();
     let sz_hp = hp.as_ref().num_elem();
+    let sz_aux = aux.as_ref().num_elem();
     let inp_thrs = Transformation::view(0,sz_thrs,inp_prog.clone());
     let inp_glob = Transformation::view(sz_thrs,sz_glob,inp_prog.clone());
-    let inp_hp = Transformation::view(sz_thrs+sz_glob,sz_hp,inp_prog);
-    (thrs,inp_thrs,glob,inp_glob,hp,inp_hp,aux)
+    let inp_hp = Transformation::view(sz_thrs+sz_glob,sz_hp,inp_prog.clone());
+    let inp_aux = Transformation::view(sz_thrs+sz_glob+sz_hp,sz_aux,inp_prog);
+    (thrs,inp_thrs,glob,inp_glob,hp,inp_hp,aux,inp_aux)
 }
 
 fn decompose_program_input<'a,'b,V>(x: OptRef<'a,ProgramInput<'b,V>>)
@@ -411,9 +418,13 @@ impl<'b,V : HasSorts> HasSorts for Program<'b,V> {
         if pos < off2 {
             return self.global.elem_sort(pos-off1,em)
         }
-        debug_assert!({ let off3 = off2+self.heap.num_elem();
-                        pos < off3 });
-        self.heap.elem_sort(pos-off2,em)
+        let off3 = off2+self.heap.num_elem();
+        if pos < off3 {
+            return self.heap.elem_sort(pos-off2,em)
+        }
+        debug_assert!({ let off4 = off2+self.aux.num_elem();
+                        pos < off4 });
+        self.aux.elem_sort(pos-off3,em)
     }
 }
 
@@ -426,8 +437,14 @@ impl<'b,V : Bytes+FromConst<'b>+Clone> Composite for Program<'b,V> {
               FComb : Fn(Transf<Em>,Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
               FL : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
               FR : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error> {
-        let (thr_x,inp_thr_x,glb_x,inp_glb_x,hp_x,inp_hp_x,aux_x) = decompose_program(x,inp_x);
-        let (thr_y,inp_thr_y,glb_y,inp_glb_y,hp_y,inp_hp_y,aux_y) = decompose_program(y,inp_y);
+        let (thr_x,inp_thr_x,
+             glb_x,inp_glb_x,
+             hp_x,inp_hp_x,
+             aux_x,inp_aux_x) = decompose_program(x,inp_x);
+        let (thr_y,inp_thr_y,
+             glb_y,inp_glb_y,
+             hp_y,inp_hp_y,
+             aux_y,inp_aux_y) = decompose_program(y,inp_y);
 
         if aux_x.as_ref()!=aux_y.as_ref() {
             return Ok(None)
@@ -454,11 +471,18 @@ impl<'b,V : Bytes+FromConst<'b>+Clone> Composite for Program<'b,V> {
             Some(r) => r
         };
 
+        let (aux,inp_aux) = match Choice::combine(aux_x,aux_y,
+                                                  inp_aux_x,inp_aux_y,
+                                                  comb,only_l,only_r,em)? {
+            None => return Ok(None),
+            Some(r) => r
+        };
+
         Ok(Some((OptRef::Owned(Program { threads: thr.as_obj(),
                                          global: glb.as_obj(),
                                          heap: hp.as_obj(),
-                                         aux: aux_x.as_obj() }),
-                 Transformation::concat(&[inp_thr,inp_glb,inp_hp]))))
+                                         aux: aux.as_obj() }),
+                 Transformation::concat(&[inp_thr,inp_glb,inp_hp,inp_aux]))))
     }
 }
 
@@ -997,13 +1021,15 @@ impl<'a,V> ViewMut for PointerView<'a,V>
 pub enum ProgramMeaning<'b,V : Semantic+Bytes+FromConst<'b>> {
     Threads(<Threads<'b,V> as Semantic>::Meaning),
     Global(<Globals<'b,V> as Semantic>::Meaning),
-    Heap(<Heap<'b,V> as Semantic>::Meaning)
+    Heap(<Heap<'b,V> as Semantic>::Meaning),
+    Aux(<Aux as Semantic>::Meaning)
 }
 
 pub enum ProgramMeaningCtx<'b,V : Semantic+Bytes+FromConst<'b>> {
     Threads(<Threads<'b,V> as Semantic>::MeaningCtx),
     Global(<Globals<'b,V> as Semantic>::MeaningCtx),
-    Heap(<Heap<'b,V> as Semantic>::MeaningCtx)
+    Heap(<Heap<'b,V> as Semantic>::MeaningCtx),
+    Aux(<Aux as Semantic>::MeaningCtx)
 }
 
 impl<'b,V : Semantic+Bytes+FromConst<'b>> PartialEq for ProgramMeaning<'b,V> {
@@ -1019,6 +1045,10 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> PartialEq for ProgramMeaning<'b,V> {
             },
             &ProgramMeaning::Heap(ref p) => match other {
                 &ProgramMeaning::Heap(ref q) => p.eq(q),
+                _ => false
+            },
+            &ProgramMeaning::Aux(ref p) => match other {
+                &ProgramMeaning::Aux(ref q) => p.eq(q),
                 _ => false
             }
         }
@@ -1045,7 +1075,11 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> Ord for ProgramMeaning<'b,V> {
             (&ProgramMeaning::Global(_),_) => Ordering::Less,
             (_,&ProgramMeaning::Global(_)) => Ordering::Greater,
             (&ProgramMeaning::Heap(ref p),
-             &ProgramMeaning::Heap(ref q)) => p.cmp(q)
+             &ProgramMeaning::Heap(ref q)) => p.cmp(q),
+            (&ProgramMeaning::Heap(ref p),_) => Ordering::Less,
+            (_,&ProgramMeaning::Heap(ref p)) => Ordering::Greater,
+            (&ProgramMeaning::Aux(ref p),
+             &ProgramMeaning::Aux(ref q)) => p.cmp(q)
         }
     }
 }
@@ -1064,6 +1098,10 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> Hash for ProgramMeaning<'b,V> {
             &ProgramMeaning::Heap(ref p) => {
                 (2 as u8).hash(state);
                 p.hash(state);
+            },
+            &ProgramMeaning::Aux(ref p) => {
+                (3 as u8).hash(state);
+                p.hash(state)
             }
         }
     }
@@ -1078,6 +1116,8 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> fmt::Debug for ProgramMeaning<'b,V> {
                 .field(p).finish(),
             &ProgramMeaning::Heap(ref p) => f.debug_tuple("Heap")
                 .field(p).finish(),
+            &ProgramMeaning::Aux(ref p) => f.debug_tuple("Aux")
+                .field(p).finish()
         }
     }
 }
@@ -1104,7 +1144,11 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for Program<'b,V> {
         if pos<off2 {
             return ProgramMeaning::Global(self.global.meaning(pos-off1))
         }
-        ProgramMeaning::Heap(self.heap.meaning(pos-off1))
+        let off3 = off2+self.heap.num_elem();
+        if pos<off3 {
+            return ProgramMeaning::Heap(self.heap.meaning(pos-off2))
+        }
+        return ProgramMeaning::Aux(self.aux.meaning(pos-off3))
     }
     fn fmt_meaning<F : fmt::Write>(&self,m: &Self::Meaning,fmt: &mut F) -> Result<(),fmt::Error> {
         match m {
@@ -1119,6 +1163,10 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for Program<'b,V> {
             &ProgramMeaning::Heap(ref nm) => {
                 write!(fmt,"heap.")?;
                 self.heap.fmt_meaning(nm,fmt)
+            },
+            &ProgramMeaning::Aux(ref nm) => {
+                write!(fmt,"aux.")?;
+                self.aux.fmt_meaning(nm,fmt)
             }
         }
     }
@@ -1132,6 +1180,9 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for Program<'b,V> {
         } else if let Some((ctx,m)) = self.heap.first_meaning() {
             Some((ProgramMeaningCtx::Heap(ctx),
                   ProgramMeaning::Heap(m)))
+        } else if let Some((ctx,m)) = self.aux.first_meaning() {
+            Some((ProgramMeaningCtx::Aux(ctx),
+                  ProgramMeaning::Aux(m)))
         } else {
             None
         }
@@ -1147,6 +1198,9 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for Program<'b,V> {
                 } else if let Some((nctx,nm)) = self.heap.first_meaning() {
                     (ProgramMeaningCtx::Heap(nctx),
                      ProgramMeaning::Heap(nm))
+                } else if let Some((nctx,nm)) = self.aux.first_meaning() {
+                    (ProgramMeaningCtx::Aux(nctx),
+                     ProgramMeaning::Aux(nm))
                 } else {
                     return false
                 },
@@ -1158,13 +1212,27 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for Program<'b,V> {
                 } else if let Some((nctx,nm)) = self.heap.first_meaning() {
                     (ProgramMeaningCtx::Heap(nctx),
                      ProgramMeaning::Heap(nm))
+                } else if let Some((nctx,nm)) = self.aux.first_meaning() {
+                    (ProgramMeaningCtx::Aux(nctx),
+                     ProgramMeaning::Aux(nm))
                 } else {
                     return false
                 },
                 _ => unreachable!()
             },
             &mut ProgramMeaningCtx::Heap(ref mut cctx) => match m {
-                &mut ProgramMeaning::Heap(ref mut cm) => return self.heap.next_meaning(cctx,cm),
+                &mut ProgramMeaning::Heap(ref mut cm) => if self.heap.next_meaning(cctx,cm) {
+                    return true
+                } else if let Some((nctx,nm)) = self.aux.first_meaning() {
+                    (ProgramMeaningCtx::Aux(nctx),
+                     ProgramMeaning::Aux(nm))
+                } else {
+                    return false
+                },
+                _ => unreachable!()
+            },
+            &mut ProgramMeaningCtx::Aux(ref mut cctx) => match m {
+                &mut ProgramMeaning::Aux(ref mut cm) => return self.aux.next_meaning(cctx,cm),
                 _ => unreachable!()
             }
         };
@@ -1460,7 +1528,7 @@ impl<'a,V : Bytes+FromConst<'a>+Pointer<'a>+Debug> MemLookup<'a,V> {
                 }
             },
             &MemLookup::Aux(n) => {
-                let bytes = &prog.aux[n];
+                //let bytes = &prog.aux[n];
                 unimplemented!()
             },
             _ => unimplemented!()

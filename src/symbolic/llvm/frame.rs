@@ -752,21 +752,21 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for Frame<'b,V> {
 }
 
 #[derive(Clone)]
-pub enum CallFrameMeaning<'b,V : Semantic> {
+pub enum CallFrameMeaning<'b,V : Semantic+HasSorts> {
     Values(<Assoc<&'b String,V> as Semantic>::Meaning),
     Arguments(<Vec<V> as Semantic>::Meaning),
     Activation(<Activation<'b> as Semantic>::Meaning),
     Phi(<Choice<Data<&'b String>> as Semantic>::Meaning)
 }
 
-pub enum CallFrameMeaningCtx<'b,V : Semantic> {
+pub enum CallFrameMeaningCtx<'b,V : Semantic+HasSorts> {
     Values(<Assoc<&'b String,V> as Semantic>::MeaningCtx),
     Arguments(<Vec<V> as Semantic>::MeaningCtx),
     Activation(<Activation<'b> as Semantic>::MeaningCtx),
     Phi(<Choice<Data<&'b String>> as Semantic>::MeaningCtx)
 }
 
-impl<'b,V : Semantic> PartialEq for CallFrameMeaning<'b,V> {
+impl<'b,V : Semantic+HasSorts> PartialEq for CallFrameMeaning<'b,V> {
     fn eq(&self,other: &CallFrameMeaning<'b,V>) -> bool {
         match self {
             &CallFrameMeaning::Values(ref p) => match other {
@@ -789,15 +789,15 @@ impl<'b,V : Semantic> PartialEq for CallFrameMeaning<'b,V> {
     }
 }
 
-impl<'b,V : Semantic> Eq for CallFrameMeaning<'b,V> {}
+impl<'b,V : Semantic+HasSorts> Eq for CallFrameMeaning<'b,V> {}
 
-impl<'b,V : Semantic> PartialOrd for CallFrameMeaning<'b,V> {
+impl<'b,V : Semantic+HasSorts> PartialOrd for CallFrameMeaning<'b,V> {
     fn partial_cmp(&self,other: &CallFrameMeaning<'b,V>) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<'b,V : Semantic> Ord for CallFrameMeaning<'b,V> {
+impl<'b,V : Semantic+HasSorts> Ord for CallFrameMeaning<'b,V> {
     fn cmp(&self,other: &CallFrameMeaning<'b,V>) -> Ordering {
         match (self,other) {
             (&CallFrameMeaning::Values(ref p),
@@ -818,7 +818,7 @@ impl<'b,V : Semantic> Ord for CallFrameMeaning<'b,V> {
     }
 }
 
-impl<'b,V : Semantic> Hash for CallFrameMeaning<'b,V> {
+impl<'b,V : Semantic+HasSorts> Hash for CallFrameMeaning<'b,V> {
     fn hash<H>(&self, state: &mut H) where H: Hasher {
         match self {
             &CallFrameMeaning::Values(ref p) => {
@@ -841,7 +841,7 @@ impl<'b,V : Semantic> Hash for CallFrameMeaning<'b,V> {
     }
 }
 
-impl<'b,V : Semantic> fmt::Debug for CallFrameMeaning<'b,V> {
+impl<'b,V : Semantic+HasSorts> fmt::Debug for CallFrameMeaning<'b,V> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         match self {
             &CallFrameMeaning::Values(ref p) => f.debug_tuple("Values")
@@ -856,7 +856,7 @@ impl<'b,V : Semantic> fmt::Debug for CallFrameMeaning<'b,V> {
     }
 }
 
-impl<'b,V : Semantic> CallFrameMeaning<'b,V> {
+impl<'b,V : Semantic+HasSorts> CallFrameMeaning<'b,V> {
     pub fn is_pc(&self) -> bool {
         match self {
             &CallFrameMeaning::Activation(_) => true,

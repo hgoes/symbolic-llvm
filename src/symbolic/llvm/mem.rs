@@ -171,7 +171,6 @@ impl<'a,V : Bytes+FromConst<'a>+Clone+Debug> MemSlice<'a,V> {
         match off.as_ref().1 {
             None => Self::read_static(sl,inp_sl,stat_off,len,em),
             Some(ref singleton) => {
-                panic!("No dynamic reading!");
                 let srt = singleton.0.kind();
                 let (val0,inp_val0) = match Self::read_static(sl.to_ref(),inp_sl.clone(),stat_off,len,em)? {
                     None => return Ok(None),
@@ -191,7 +190,7 @@ impl<'a,V : Bytes+FromConst<'a>+Clone+Debug> MemSlice<'a,V> {
                         em.eq(e,c)
                     };
                     let cond = Transformation::map_by_elem(Box::new(cond_fun),inp_off.clone());
-                    let (nval,inp_nval) = match ite(cval,rval,cond,inp_cval,inp_rval,em)? {
+                    let (nval,inp_nval) = match ite(rval,cval,cond,inp_rval,inp_cval,em)? {
                         None => return Ok(None),
                         Some(r) => r
                     };
