@@ -1,33 +1,30 @@
-extern crate smtrs;
-extern crate num_bigint;
-extern crate num_traits;
-extern crate llvm_ir;
-
 pub mod mem;
 pub mod frame;
 pub mod thread;
 pub mod program;
-pub mod error;
+//pub mod error;
 pub mod pointer;
 pub mod library;
 
-use self::smtrs::composite::*;
-use self::smtrs::embed::{Embed,DeriveConst,DeriveValues};
-use self::smtrs::types::{Sort,SortKind,Value};
-use self::num_bigint::BigUint;
-use self::num_traits::cast::ToPrimitive;
+use smtrs::composite::*;
+use smtrs::composite::singleton::*;
+use smtrs::embed::{Embed,DeriveConst,DeriveValues};
+use smtrs::types::{Sort,SortKind,Value};
+use num_bigint::BigUint;
+use num_traits::cast::ToPrimitive;
 use std::ops::Shl;
 use std::fmt::Debug;
 use std::collections::HashMap;
 use self::mem::{Bytes,FromConst,MemSlice,MemObj};
-use self::frame::*;
+/*use self::frame::*;
 use self::thread::*;
 use self::program::*;
 use self::pointer::*;
-use self::library::Library;
-use self::llvm_ir::Module;
-use self::llvm_ir::datalayout::{DataLayout};
-use self::llvm_ir::types::{Type};
+use self::library::Library;*/
+use llvm_ir;
+use llvm_ir::Module;
+use llvm_ir::datalayout::{DataLayout};
+use llvm_ir::types::{Type};
 use std::iter::{Once,once};
 use std::cmp::Ordering;
 use std::hash::{Hash,Hasher};
@@ -39,13 +36,13 @@ pub struct InstructionRef<'a> {
     pub basic_block: &'a String,
     pub instruction: usize
 }
-
-pub enum TrErr<'a,V : Bytes + Clone,Err> {
+/*
+pub enum TrErr<'a,V: Bytes<'a> + Clone,Err> {
     EmErr(Err),
     InputNeeded(ProgramInput<'a,V>)
 }
 
-impl<'a,V : Bytes+Clone,Err> From<Err> for TrErr<'a,V,Err> {
+impl<'a,V: Bytes<'a>+Clone,Err> From<Err> for TrErr<'a,V,Err> {
     fn from(err:Err) -> Self {
         TrErr::EmErr(err)
     }
@@ -83,10 +80,10 @@ impl<'a> InstructionRef<'a> {
                          basic_block: self.basic_block,
                          instruction: self.instruction + 1 }
     }
-}
+}*/
 
 const INDEX_WIDTH: usize = 32;
-
+/*
 pub fn translate_init<'a,'b,V,Em>(module: &'a Module,
                                   entry_fun: &'a String,
                                   args: Vec<V>,
@@ -1579,41 +1576,53 @@ fn translate_global_<'b,V>(dl: &'b DataLayout,
             res.push(MemObj::ConstObj(dl,c,tp,mp));
         }
     }
-}
+}*/
 
-pub trait IntValue : Composite {
-    fn const_int<Em : Embed>(u64,BigUint,&mut Em) -> Result<(Self,Vec<Em::Expr>),Em::Error>;
-    fn bin<'b,Em>(op: &llvm_ir::BinOp,
-                  lhs: &Self,
-                  rhs: &Self,
-                  inp_l: Transf<Em>,
-                  inp_r: Transf<Em>,
-                  exprs: &[Em::Expr],
-                  em: &mut Em)
-                  -> Result<(Self,Transf<Em>),Em::Error>
-        where Em : DeriveValues;
-    fn sext<'a,Em>(OptRef<'a,Self>,Transf<Em>,usize,&mut Em)
-                   -> (OptRef<'a,Self>,Transf<Em>)
-        where Em : Embed;
-    fn zext<'a,Em>(OptRef<'a,Self>,Transf<Em>,usize,&mut Em)
-                   -> (OptRef<'a,Self>,Transf<Em>)
-        where Em : Embed;
-    fn trunc<'a,Em>(OptRef<'a,Self>,Transf<Em>,usize,&mut Em)
-                   -> (OptRef<'a,Self>,Transf<Em>)
-        where Em : Embed;
-    fn icmp<Em>(&llvm_ir::CmpOp,
-                &Self,Transf<Em>,
-                &Self,Transf<Em>,
-                &mut Em)
-                -> Result<Transf<Em>,Em::Error>
-        where Em : Embed;
-    fn from_bool<Em : Embed>(Transf<Em>) -> Result<(Self,Transf<Em>),Em::Error>;
-    fn to_bool<'a,Em : Embed>(OptRef<'a,Self>,Transf<Em>) -> Result<Transf<Em>,Em::Error>;
-    fn to_offset<'a,Em : Embed>(OptRef<'a,Self>,Transf<Em>) -> (Singleton,Transf<Em>);
-    fn from_offset<'a,Em : Embed>(usize,&Singleton,Transf<Em>)
-                                  -> (Self,Transf<Em>);
+pub trait IntValue<'a>: Composite<'a> {
+    fn const_int<Em: Embed>(u64,BigUint,&mut Vec<Em::Expr>,&mut Em)
+                            -> Result<Self,Em::Error>;
+    fn bin<P1: Path<'a,Em,To=Self>,
+           P2: Path<'a,Em,To=Self>,
+           Em: DeriveValues>(op: &llvm_ir::BinOp,
+                             lhs: &P1,
+                             lfrom: &P1::From,
+                             larr: &[Em::Expr],
+                             rhs: &P2,
+                             rfrom: &P2::From,
+                             rarr: &[Em::Expr],
+                             res: &mut Vec<Em::Expr>,
+                             em: &mut Em)
+                             -> Result<Self,Em::Error>;
+    fn sext<P: Path<'a,Em,To=Self>,
+            Em: Embed>(&P,&P::From,&[Em::Expr],usize,&mut Vec<Em::Expr>,&mut Em)
+                       -> Result<Self,Em::Error>;
+    fn zext<P: Path<'a,Em,To=Self>,
+            Em: Embed>(&P,&P::From,&[Em::Expr],usize,&mut Vec<Em::Expr>,&mut Em)
+                       -> Result<Self,Em::Error>;
+    fn trunc<P: Path<'a,Em,To=Self>,
+             Em: Embed>(&P,&P::From,&[Em::Expr],usize,&mut Vec<Em::Expr>,&mut Em)
+                        -> Result<Self,Em::Error>;
+    fn icmp<P1: Path<'a,Em,To=Self>,
+            P2: Path<'a,Em,To=Self>,
+            Em: Embed>(&llvm_ir::CmpOp,
+                       &P1,&P1::From,&[Em::Expr],
+                       &P2,&P2::From,&[Em::Expr],
+                       &mut Em)
+                       -> Result<Em::Expr,Em::Error>;
+    fn from_bool<Em: Embed>(Em::Expr,&mut Vec<Em::Expr>,&mut Em)
+                            -> Result<Self,Em::Error>;
+    fn to_bool<P: Path<'a,Em,To=Self>,
+               Em: Embed>(&P,&P::From,&[Em::Expr],&mut Em)
+                          -> Result<Em::Expr,Em::Error>;
+    fn to_offset<P: Path<'a,Em,To=Self>,
+                 Em: Embed>(&P,&P::From,&[Em::Expr],&mut Vec<Em::Expr>,&mut Em)
+                            -> Result<Singleton,Em::Error>;
+    fn from_offset<P: Path<'a,Em,To=Singleton>,
+                   Em: Embed>(usize,&P,&P::From,&[Em::Expr],
+                              &mut Vec<Em::Expr>,&mut Em)
+                              -> Result<Self,Em::Error>;
 }
-
+/*
 pub trait FromMD<'a> : Composite {
     fn from_md<Em : Embed>(&'a llvm_ir::Metadata)
                            -> Result<(Self,Transf<Em>),Em::Error>;
@@ -3323,3 +3332,4 @@ impl<'a,Ptr : Bytes+Pointer<'a>+Clone,V : Bytes+IntValue+Clone> FromConst<'a> fo
         Ok(Some(res))
     }
 }
+*/

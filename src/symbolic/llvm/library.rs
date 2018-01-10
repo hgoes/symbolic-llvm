@@ -5,6 +5,9 @@ use super::mem::*;
 use super::pointer::*;
 use super::{InstructionRef,INDEX_WIDTH,IntValue};
 use smtrs::composite::*;
+use smtrs::composite::vec::*;
+use smtrs::composite::singleton::*;
+use smtrs::composite::choice::*;
 use smtrs::embed::{Embed,DeriveValues};
 use smtrs::types::{Value};
 use num_bigint::BigUint;
@@ -12,25 +15,100 @@ use num_traits::ToPrimitive;
 use llvm_ir::datalayout::DataLayout;
 use std::fmt::Debug;
 
-pub trait Library<'a,V : 'a+Bytes+FromConst<'a>,Em : Embed> {
-    fn call<RetV>(&self,
-                  &'a String,
-                  &Vec<V>,Transf<Em>,
-                  Option<RetV>,
-                  &'a DataLayout,
-                  InstructionRef<'a>,
-                  &mut Vec<Transf<Em>>,
-                  &Program<'a,V>,Transf<Em>,
-                  &mut Program<'a,V>,&mut Updates<Em>,
-                  &[Em::Expr],&mut Em)
-                  -> Result<bool,Em::Error>
-        where RetV : ViewInsert<Viewed=Program<'a,V>,Element=V>+ViewMut;
+pub trait Library<'a,V : 'a+Bytes<'a>+FromConst<'a>,Em : Embed> {
+    fn call<Arg: Path<'a,Em,To=CompVec<V>>,
+            Ret: Path<'a,Em,From=Program<'a,V>,To=V>
+            >(&self,
+              &'a String,
+              &Arg,&Arg::From,&[Em::Expr],
+              Option<&Ret>,
+              &'a DataLayout,
+              InstructionRef<'a>,
+              &mut Program<'a,V>,&mut Vec<Em::Expr>,
+              &[Em::Expr],
+              &mut Em)
+              -> Result<bool,Em::Error>;
 }
 
 pub struct StdLib {}
 
-impl<'a,V : 'a+Bytes+FromConst<'a>+IntValue+Pointer<'a>+Debug,Em : DeriveValues> Library<'a,V,Em> for StdLib {
-    fn call<RetV>(&self,
+impl<'a,V: 'a+Bytes<'a>+FromConst<'a>+IntValue<'a>+Pointer<'a>+Debug,Em: DeriveValues> Library<'a,V,Em> for StdLib {
+    fn call<Arg: Path<'a,Em,To=CompVec<V>>,
+            Ret: Path<'a,Em,From=Program<'a,V>,To=V>
+            >(&self,
+              name: &'a String,
+              args: &Arg,
+              args_from: &Arg::From,
+              args_arr: &[Em::Expr],
+              ret: Option<&Ret>,
+              dl: &'a DataLayout,
+              instr_id: InstructionRef<'a>,
+              prog: &mut Program<'a,V>,
+              prog_arr: &mut Vec<Em::Expr>,
+              conds: &[Em::Expr],
+              em: &mut Em)
+              -> Result<bool,Em::Error> {
+        match name.as_ref() {
+            "malloc" => {
+                let sz = args.clone().then(CompVec::element(0));
+                let mut rsz_inp = Vec::new();
+                let rsz = V::to_offset(&sz,args_from,args_arr,&mut rsz_inp,em)?;
+                let csz = Singleton::get(&Id::new(),&rsz,&rsz_inp[..],em)?;
+                let stat_sz = match em.derive_const(&csz)? {
+                    Some(Value::BitVec(_,rv)) => rv.to_usize().unwrap(),
+                    Some(c) => panic!("Construct malloc size from: {:?}",c),
+                    None => panic!("Dynamic malloc not supported")
+                };
+                // Create slice
+                let mut sl_inp = Vec::new();
+                let sl: MemSlice<'a,V> = MemSlice::alloca(stat_sz,&mut sl_inp,em)?;
+                // Insert slice into heap
+                let heap_path: Then<Id<Program<'a,V>>,HeapPath<'a,V>> = Program::heap().path();
+                let sls = Heap::lookup_or_insert(heap_path,
+                                                 prog,prog_arr,
+                                                 instr_id,
+                                                 |arr,em| CompVec::new(arr,em),
+                                                 em)?;
+                let sl_idx = CompVec::alloc(&sls,prog,prog_arr,sl,&mut sl_inp,&|_,_,_,_| Ok(false),em)?;
+                let rsl_idx = em.const_bitvec(INDEX_WIDTH,BigUint::from(sl_idx))?;
+                // Generate the new pointer
+                let mut trg_inp = Vec::new();
+                let trg = PointerTrg::heap(instr_id,rsl_idx,&mut trg_inp,em)?;
+
+                let mut ptr_inp = Vec::new();
+                let mut ptr = Choice::empty(&mut ptr_inp,em)?;
+                let rcond = if conds.len()==0 {
+                    em.const_bool(true)?
+                } else {
+                    em.and(conds.to_vec())?
+                };
+                Choice::insert(&Id::new(),&mut ptr,&mut ptr_inp,(trg,(Data((stat_sz,0)),None)),&mut trg_inp,rcond,em)?;
+                
+                
+                // Insert the pointer
+                let rret = match ret {
+                    None => panic!("malloc without return"),
+                    Some(r) => r
+                };
+                
+                let mut rval_inp = Vec::new();
+                let rval = V::from_pointer((dl.pointer_alignment(0).0/8) as usize,
+                                           &Id::new(),&ptr,&ptr_inp[..],&mut rval_inp,em)?;
+
+                if conds.len()==0 {
+                    rret.set(prog,prog_arr,rval,&mut rval_inp,em)?;
+                } else {
+                    let rcond = em.and(conds.to_vec())?;
+                    if !rret.set_cond(prog,prog_arr,rval,&mut rval_inp,&rcond,em)? {
+                        panic!("Cannot merge return value")
+                    }
+                }
+                Ok(true)
+            },
+            _ => Ok(false)
+        }
+    }
+    /*fn call<RetV>(&self,
                   name: &'a String,
                   args: &Vec<V>,
                   args_inp: Transf<Em>,
@@ -166,5 +244,5 @@ impl<'a,V : 'a+Bytes+FromConst<'a>+IntValue+Pointer<'a>+Debug,Em : DeriveValues>
             },
             _ => Ok(false)
         }
-    }
+    }*/
 }

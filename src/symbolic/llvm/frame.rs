@@ -1,7 +1,9 @@
-extern crate smtrs;
-
-use self::smtrs::composite::*;
-use self::smtrs::embed::{Embed};
+use smtrs::composite::*;
+use smtrs::composite::vec::*;
+use smtrs::composite::choice::*;
+use smtrs::composite::singleton::*;
+use smtrs::composite::map::*;
+use smtrs::embed::{Embed};
 use super::mem::{Bytes,FromConst,MemSlice};
 use super::{InstructionRef};
 use super::thread::CallId;
@@ -10,6 +12,7 @@ use std::ops::Range;
 use std::cmp::Ordering;
 use std::hash::{Hash,Hasher};
 use std::fmt;
+use std::fmt::Debug;
 
 #[derive(PartialEq,Eq,PartialOrd,Ord,Hash,Clone,Debug)]
 pub enum ContextId<'a> {
@@ -25,7 +28,7 @@ pub enum FrameId<'a> {
 
 pub type PrevFrame<'a> = Choice<Data<Option<ContextId<'a>>>>;
 
-pub type Allocations<'a,V> = Assoc<InstructionRef<'a>,Vec<MemSlice<'a,V>>>;
+pub type Allocations<'a,V> = Assoc<InstructionRef<'a>,CompVec<MemSlice<'a,V>>>;
 
 pub type Activation<'a> = Choice<Data<InstructionRef<'a>>>;
 
@@ -40,81 +43,36 @@ pub struct Frame<'a,V> {
 #[derive(PartialEq,Eq,Hash,Clone,Debug)]
 pub struct CallFrame<'a,V> {
     pub values: Assoc<&'a String,V>,
-    pub arguments: Vec<V>,
+    pub arguments: CompVec<V>,
     pub activation: Activation<'a>,
     pub phi: Phi<'a>
 }
 
-enum CallFrameDataVarsPos {
-    Values,Arguments,Phi
-}
-
-pub struct CallFrameDataVars<'a,'b : 'a,V : 'b> {
-    off: usize,
-    call_frame: &'a CallFrame<'b,V>,
-    pos: CallFrameDataVarsPos,
-    iter: Range<usize>
-}
-
-impl<'a,'b,V : Composite> Iterator for CallFrameDataVars<'a,'b,V> {
-    type Item = usize;
-    fn next(&mut self) -> Option<usize> {
-        loop {
-            match self.iter.next() {
-                Some(r) => return Some(r),
-                None => match self.pos {
-                    CallFrameDataVarsPos::Values => {
-                        self.pos = CallFrameDataVarsPos::Arguments;
-                        let args_sz = self.call_frame.arguments.num_elem();
-                        let acts_sz = self.call_frame.activation.num_elem();
-                        self.iter = self.off..self.off+args_sz;
-                        self.off+=args_sz+acts_sz;
-                    },
-                    CallFrameDataVarsPos::Arguments => {
-                        self.pos = CallFrameDataVarsPos::Phi;
-                        let phi_sz = self.call_frame.arguments.num_elem();
-                        self.iter = self.off..self.off+phi_sz;
-                        self.off+=phi_sz;
-                    },
-                    CallFrameDataVarsPos::Phi => return None
-                }
-            }
-        }
+impl<'a,V> Frame<'a,V> {
+    pub fn previous() -> PrevFramePath<'a,V> {
+        PrevFramePath(PhantomData)
+    }
+    pub fn allocations() -> AllocationsPath<'a,V> {
+        AllocationsPath(PhantomData)
     }
 }
 
-impl<'a,V : Composite> CallFrame<'a,V> {
-    pub fn pc_vars(&self,off: usize) -> Range<usize> {
-        let off_acts = off+self.values.num_elem()+
-            self.arguments.num_elem();
-        let sz_acts = self.activation.num_elem();
-        off_acts..off_acts+sz_acts
+impl<'a,V> CallFrame<'a,V> {
+    pub fn values() -> ValuesPath<'a,V> {
+        ValuesPath(PhantomData)
     }
-    pub fn data_vars<'b>(&'b self,off: usize) -> (usize,CallFrameDataVars<'b,'a,V>) {
-        let vals_sz = self.values.num_elem();
-        let args_sz = self.arguments.num_elem();
-        let acts_sz = self.activation.num_elem();
-        let phi_sz = self.activation.num_elem();
-        (vals_sz+args_sz+acts_sz+phi_sz,
-         CallFrameDataVars { off: off+vals_sz,
-                             call_frame: self,
-                             pos: CallFrameDataVarsPos::Values,
-                             iter: off..off+vals_sz })
+    pub fn arguments() -> ArgumentsPath<'a,V> {
+        ArgumentsPath(PhantomData)
+    }
+    pub fn activation() -> ActivationPath<'a,V> {
+        ActivationPath(PhantomData)
+    }
+    pub fn phi() -> PhiPath<'a,V> {
+        PhiPath(PhantomData)
     }
 }
 
-impl<'a,V : Bytes+FromConst<'a>> Frame<'a,V> {
-    pub fn pc_vars(&self,off: usize) -> Range<usize> {
-        off..off+self.previous.num_elem()
-    }
-    pub fn data_vars(&self,off: usize) -> (usize,Range<usize>) {
-        let prev_sz = self.previous.num_elem();
-        let alloc_sz = self.allocations.num_elem();
-        (prev_sz+alloc_sz,off+prev_sz..off+prev_sz+alloc_sz)
-    }
-}
-
-pub fn frame<'a,'b,'c,V,Em>(prev: OptRef<'a,PrevFrame<'b>>,
+/*pub fn frame<'a,'b,'c,V,Em>(prev: OptRef<'a,PrevFrame<'b>>,
                             inp_prev: Transf<Em>,
                             alloc: OptRef<'a,Allocations<'b,V>>,
                             inp_alloc: Transf<Em>)
@@ -233,7 +191,7 @@ pub fn call_frame_get_values<'a,'b,V,Em>(cf: OptRef<'a,CallFrame<'b,V>>,
     };
     let vals_inp = Transformation::view(0,sz,cf_inp);
     (vals,vals_inp)
-}
+}*/
 
 impl<'b,V : HasSorts> HasSorts for Frame<'b,V> {
     fn num_elem(&self) -> usize {
@@ -250,35 +208,44 @@ impl<'b,V : HasSorts> HasSorts for Frame<'b,V> {
     }
 }
 
-impl<'b,V : Bytes+FromConst<'b>+Clone> Composite for Frame<'b,V> {
-    fn combine<'a,Em,FComb,FL,FR>(x: OptRef<'a,Self>,y: OptRef<'a,Self>,
-                                  inp_x: Transf<Em>,inp_y: Transf<Em>,
-                                  comb: &FComb,only_l: &FL,only_r: &FR,em: &mut Em)
-                                  -> Result<Option<(OptRef<'a,Self>,Transf<Em>)>,Em::Error>
-        where Em : Embed,
-              FComb : Fn(Transf<Em>,Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
-              FL : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
-              FR : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error> {
+impl<'a,V: Bytes<'a>+FromConst<'a>+Clone+Debug> Composite<'a> for Frame<'a,V> {
+    fn combine<Em,PL,PR,FComb,FL,FR>(
+        pl: &PL,froml: &PL::From,arrl: &[Em::Expr],
+        pr: &PR,fromr: &PR::From,arrr: &[Em::Expr],
+        comb: &FComb,only_l: &FL,only_r: &FR,
+        res: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<Option<Self>,Em::Error>
+        where
+        Em: Embed,
+        PL: Path<'a,Em,To=Self>,
+        PR: Path<'a,Em,To=Self>,
+        FComb: Fn(Em::Expr,Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
+        FL: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
+        FR: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error> {
 
-        let (prev_x,inp_prev_x,alloc_x,inp_alloc_x) = decompose_frame(x,inp_x);
-        let (prev_y,inp_prev_y,alloc_y,inp_alloc_y) = decompose_frame(y,inp_y);
+        let prev_l = pl.clone().then(Frame::previous());
+        let prev_r = pr.clone().then(Frame::previous());
+        let nprev = match PrevFrame::combine(&prev_l,froml,arrl,
+                                             &prev_r,fromr,arrr,
+                                             comb,only_l,only_r,
+                                             res,em)? {
+            None => return Ok(None),
+            Some(obj) => obj
+        };
+
+        let alloc_l = pl.clone().then(Frame::allocations());
+        let alloc_r = pr.clone().then(Frame::allocations());
+        let nalloc = match Assoc::combine(&alloc_l,froml,arrl,
+                                          &alloc_r,fromr,arrr,
+                                          comb,only_l,only_r,
+                                          res,em)? {
+            None => return Ok(None),
+            Some(obj) => obj
+        };
         
-        match Choice::combine(prev_x,prev_y,
-                              inp_prev_x,inp_prev_y,
-                              comb,only_l,only_r,em)? {
-            None => Ok(None),
-            Some((nprev,inp_nprev)) => {
-                match Assoc::combine(alloc_x,alloc_y,
-                                     inp_alloc_x,inp_alloc_y,
-                                     comb,only_l,only_r,em)? {
-                    None => Ok(None),
-                    Some((nalloc,inp_nalloc))
-                        => Ok(Some((OptRef::Owned(Frame { previous: nprev.as_obj(),
-                                                          allocations: nalloc.as_obj() }),
-                                    Transformation::concat(&[inp_nprev,inp_nalloc]))))
-                }
-            }
-        }
+        Ok(Some(Frame { previous: nprev,
+                        allocations: nalloc }))
     }
 }
 
@@ -307,308 +274,565 @@ impl<'b,V : HasSorts> HasSorts for CallFrame<'b,V> {
     }
 }
 
-impl<'b,V : Composite+FromConst<'b>+Clone> Composite for CallFrame<'b,V> {
-    fn combine<'a,Em,FComb,FL,FR>(x: OptRef<'a,Self>,y: OptRef<'a,Self>,
-                                  inp_x: Transf<Em>,inp_y: Transf<Em>,
-                                  comb: &FComb,only_l: &FL,only_r: &FR,em: &mut Em)
-                                  -> Result<Option<(OptRef<'a,Self>,Transf<Em>)>,Em::Error>
-        where Em : Embed,
-              FComb : Fn(Transf<Em>,Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
-              FL : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
-              FR : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error> {
+impl<'a,V: Bytes<'a>+FromConst<'a>+Clone> Composite<'a> for CallFrame<'a,V> {
+    fn combine<Em,PL,PR,FComb,FL,FR>(
+        pl: &PL,froml: &PL::From,arrl: &[Em::Expr],
+        pr: &PR,fromr: &PR::From,arrr: &[Em::Expr],
+        comb: &FComb,only_l: &FL,only_r: &FR,
+        res: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<Option<Self>,Em::Error>
+        where
+        Em: Embed,
+        PL: Path<'a,Em,To=Self>,
+        PR: Path<'a,Em,To=Self>,
+        FComb: Fn(Em::Expr,Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
+        FL: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
+        FR: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error> {
 
-        let (vals_x,inp_vals_x,args_x,inp_args_x,acts_x,inp_acts_x,phi_x,inp_phi_x) = decompose_callframe(x,inp_x);
-        let (vals_y,inp_vals_y,args_y,inp_args_y,acts_y,inp_acts_y,phi_y,inp_phi_y) = decompose_callframe(y,inp_y);
-        let (nvalues,nvalues_inp) = match Assoc::combine(vals_x,vals_y,
-                                                         inp_vals_x,inp_vals_y,
-                                                         comb,only_l,only_r,em)? {
-            Some(r) => r,
-            None => return Ok(None)
+        let vals_l = pl.clone().then(CallFrame::values());
+        let vals_r = pr.clone().then(CallFrame::values());
+        let nvals = match Assoc::combine(&vals_l,froml,arrl,
+                                         &vals_r,fromr,arrr,
+                                         comb,only_l,only_r,
+                                         res,em)? {
+            None => return Ok(None),
+            Some(obj) => obj
         };
-        let (nargs,nargs_inp) = match Vec::combine(args_x,args_y,
-                                                   inp_args_x,inp_args_y,
-                                                   comb,only_l,only_r,em)? {
-            Some(r) => r,
-            None => return Ok(None)
+
+        let args_l = pl.clone().then(CallFrame::arguments());
+        let args_r = pr.clone().then(CallFrame::arguments());
+        let nargs = match CompVec::combine(&args_l,froml,arrl,
+                                           &args_r,fromr,arrr,
+                                           comb,only_l,only_r,
+                                           res,em)? {
+            None => return Ok(None),
+            Some(obj) => obj
         };
-        let (nact,nact_inp) = match Choice::combine(acts_x,acts_y,
-                                                    inp_acts_x,inp_acts_y,
-                                                    comb,only_l,only_r,em)? {
-            Some(r) => r,
-            None => return Ok(None)
+
+        let act_l = pl.clone().then(CallFrame::activation());
+        let act_r = pr.clone().then(CallFrame::activation());
+        let nact = match Activation::combine(&act_l,froml,arrl,
+                                             &act_r,fromr,arrr,
+                                             comb,only_l,only_r,
+                                             res,em)? {
+            None => return Ok(None),
+            Some(obj) => obj
         };
-        let (nphi,nphi_inp) = match Choice::combine(phi_x,phi_y,
-                                                    inp_phi_x,inp_phi_y,
-                                                    comb,only_l,only_r,em)? {
-            Some(r) => r,
-            None => return Ok(None)
+
+        let phi_l = pl.clone().then(CallFrame::phi());
+        let phi_r = pr.clone().then(CallFrame::phi());
+        let nphi = match Phi::combine(&phi_l,froml,arrl,
+                                      &phi_r,fromr,arrr,
+                                      comb,only_l,only_r,
+                                      res,em)? {
+            None => return Ok(None),
+            Some(obj) => obj
         };
-        Ok(Some((OptRef::Owned(CallFrame { values: nvalues.as_obj(),
-                                           arguments: nargs.as_obj(),
-                                           activation: nact.as_obj(),
-                                           phi: nphi.as_obj() }),
-                 Transformation::concat(&[nvalues_inp,nargs_inp,nact_inp,nphi_inp]))))
+
+        Ok(Some(CallFrame {
+            values: nvals,
+            arguments: nargs,
+            activation: nact,
+            phi: nphi
+        }))
     }
 }
 
 #[derive(Clone,PartialEq,Eq,Debug)]
-pub struct PrevFrameView<'a,V : 'a>(PhantomData<&'a V>);
+pub struct PrevFramePath<'a,V: 'a>(PhantomData<&'a V>);
 
 #[derive(Clone,PartialEq,Eq,Debug)]
-pub struct AllocationsView<'a,V : 'a>(PhantomData<&'a V>);
+pub struct AllocationsPath<'a,V: 'a>(PhantomData<&'a V>);
 
 #[derive(PartialEq,Eq,Debug)]
-pub struct ValuesView<'a,V : 'a>(PhantomData<&'a V>);
+pub struct ValuesPath<'a,V: 'a>(PhantomData<&'a V>);
 
 #[derive(PartialEq,Eq,Debug)]
-pub struct ArgumentsView<'a,V : 'a>(PhantomData<&'a V>);
+pub struct ArgumentsPath<'a,V: 'a>(PhantomData<&'a V>);
 
 #[derive(PartialEq,Eq,Debug)]
-pub struct ActivationView<'a,V : 'a>(PhantomData<&'a V>);
+pub struct ActivationPath<'a,V: 'a>(PhantomData<&'a V>);
 
 #[derive(PartialEq,Eq,Debug)]
-pub struct PhiView<'a,V : 'a>(PhantomData<&'a V>);
+pub struct PhiPath<'a,V: 'a>(PhantomData<&'a V>);
 
-impl<'a,V> PrevFrameView<'a,V> {
+impl<'a,V> PrevFramePath<'a,V> {
     pub fn new() -> Self {
-        PrevFrameView(PhantomData)
+        PrevFramePath(PhantomData)
     }
 }
 
-impl<'a,V> AllocationsView<'a,V> {
+impl<'a,V> AllocationsPath<'a,V> {
     pub fn new() -> Self {
-        AllocationsView(PhantomData)
+        AllocationsPath(PhantomData)
     }
 }
 
-impl<'a,V> ValuesView<'a,V> {
+impl<'a,V> ValuesPath<'a,V> {
     pub fn new() -> Self {
-        ValuesView(PhantomData)
+        ValuesPath(PhantomData)
     }
 }
 
-impl<'a,V> ArgumentsView<'a,V> {
+impl<'a,V> ArgumentsPath<'a,V> {
     pub fn new() -> Self {
-        ArgumentsView(PhantomData)
+        ArgumentsPath(PhantomData)
     }
 }
 
-impl<'a,V> ActivationView<'a,V> {
+impl<'a,V> ActivationPath<'a,V> {
     pub fn new() -> Self {
-        ActivationView(PhantomData)
+        ActivationPath(PhantomData)
     }
 }
 
-impl<'a,V> PhiView<'a,V> {
+impl<'a,V> PhiPath<'a,V> {
     pub fn new() -> Self {
-        PhiView(PhantomData)
+        PhiPath(PhantomData)
     }
 }
 
-impl<'a,V> Clone for ValuesView<'a,V> {
+impl<'a,V> Clone for ValuesPath<'a,V> {
     fn clone(&self) -> Self {
-        ValuesView(PhantomData)
+        ValuesPath(PhantomData)
     }
 }
 
-impl<'a,V> Clone for ArgumentsView<'a,V> {
+impl<'a,V> Clone for ArgumentsPath<'a,V> {
     fn clone(&self) -> Self {
-        ArgumentsView(PhantomData)
+        ArgumentsPath(PhantomData)
     }
 }
 
-impl<'a,V> Clone for ActivationView<'a,V> {
+impl<'a,V> Clone for ActivationPath<'a,V> {
     fn clone(&self) -> Self {
-        ActivationView(PhantomData)
+        ActivationPath(PhantomData)
     }
 }
 
-impl<'a,V> Clone for PhiView<'a,V> {
+impl<'a,V> Clone for PhiPath<'a,V> {
     fn clone(&self) -> Self {
-        PhiView(PhantomData)
+        PhiPath(PhantomData)
     }
 }
 
-impl<'a,V> View for PrevFrameView<'a,V>
-    where V : 'a + Bytes+FromConst<'a> {
-    type Viewed = Frame<'a,V>;
-    type Element = PrevFrame<'a>;
-    fn get_el<'b>(&self,obj: &'b Self::Viewed)
-                  -> &'b Self::Element where Self : 'b {
+impl<'a,V> SimplePathEl<'a> for PrevFramePath<'a,V>
+    where V: 'a + Bytes<'a>+FromConst<'a> {
+    type From = Frame<'a,V>;
+    type To = PrevFrame<'a>;
+    fn get<'b>(&self,obj: &'b Self::From)
+               -> &'b Self::To where 'a: 'b {
         &obj.previous
     }
-    fn get_el_ext<'b>(&self,obj: &'b Self::Viewed)
-                      -> (usize,&'b Self::Element) where Self : 'b {
-        (0,&obj.previous)
+    fn get_mut<'c>(&self,from: &'c mut Self::From)
+                   -> &'c mut Self::To where 'a: 'c {
+        &mut from.previous
     }
 }
 
-impl<'a,V> ViewMut for PrevFrameView<'a,V>
-    where V : 'a + Bytes+FromConst<'a> {
-    fn get_el_mut<'b>(&self,obj: &'b mut Self::Viewed)
-                      -> &'b mut Self::Element where Self : 'b {
-        &mut obj.previous
+impl<'a,Em: Embed,V> PathEl<'a,Em> for PrevFramePath<'a,V>
+    where V: 'a + Bytes<'a>+FromConst<'a> {
+    fn read<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        prev.read(prev_from,pos,arr,em)
     }
-    fn get_el_mut_ext<'b>(&self,obj: &'b mut Self::Viewed)
-                          -> (usize,&'b mut Self::Element)
-        where Self : 'b {
-        (0,&mut obj.previous)
+    fn read_slice<'c,Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        len: usize,
+        arr: &'c [Em::Expr])
+        -> Option<&'c [Em::Expr]> {
+        prev.read_slice(prev_from,pos,len,arr)
     }
-}
-
-impl<'a,V> View for AllocationsView<'a,V>
-    where V : 'a + Bytes+FromConst<'a> {
-    type Viewed = Frame<'a,V>;
-    type Element = Allocations<'a,V>;
-    fn get_el<'b>(&self,obj: &'b Self::Viewed)
-                  -> &'b Self::Element where Self : 'b {
-        &obj.allocations
+    fn write<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write(prev_from,pos,e,arr,em)
     }
-    fn get_el_ext<'b>(&self,obj: &'b Self::Viewed)
-                      -> (usize,&'b Self::Element) where Self : 'b {
-        (obj.previous.num_elem(),&obj.allocations)
-    }
-}
-
-impl<'a,V> ViewMut for AllocationsView<'a,V>
-    where V : 'a + Bytes+FromConst<'a> {
-    fn get_el_mut<'b>(&self,obj: &'b mut Self::Viewed)
-                      -> &'b mut Self::Element where Self : 'b {
-        &mut obj.allocations
-    }
-    fn get_el_mut_ext<'b>(&self,obj: &'b mut Self::Viewed)
-                          -> (usize,&'b mut Self::Element)
-        where Self : 'b {
-        (obj.previous.num_elem(),&mut obj.allocations)
-    }
-}
-
-impl<'a,V> View for ValuesView<'a,V>
-    where V : 'a + Bytes+FromConst<'a> {
-    type Viewed = CallFrame<'a,V>;
-    type Element = Assoc<&'a String,V>;
-    fn get_el<'b>(&self,obj: &'b Self::Viewed)
-                  -> &'b Self::Element where Self : 'b {
-        &obj.values
-    }
-    fn get_el_ext<'b>(&self,obj: &'b Self::Viewed)
-                      -> (usize,&'b Self::Element) where Self : 'b {
-        (0,&obj.values)
+    fn write_slice<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &mut Prev::From,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write_slice(prev_from,pos,old_len,src,trg,em)
     }
 }
 
-impl<'a,V> ViewMut for ValuesView<'a,V>
-    where V : 'a + Bytes+FromConst<'a> {
-    fn get_el_mut<'b>(&self,obj: &'b mut Self::Viewed)
-                      -> &'b mut Self::Element where Self : 'b {
-        &mut obj.values
+impl<'a,V> SimplePathEl<'a> for AllocationsPath<'a,V>
+    where V : 'a + Bytes<'a>+FromConst<'a> {
+    type From = Frame<'a,V>;
+    type To   = Allocations<'a,V>;
+    fn get<'c>(&self,from: &'c Self::From) -> &'c Self::To where 'a: 'c {
+        &from.allocations
     }
-    fn get_el_mut_ext<'b>(&self,obj: &'b mut Self::Viewed)
-                          -> (usize,&'b mut Self::Element)
-        where Self : 'b {
-        (0,&mut obj.values)
-    }
-}
-
-impl<'a,V> View for ArgumentsView<'a,V>
-    where V : 'a + Bytes+FromConst<'a> {
-    type Viewed = CallFrame<'a,V>;
-    type Element = Vec<V>;
-    fn get_el<'b>(&self,obj: &'b Self::Viewed)
-                  -> &'b Self::Element where Self : 'b {
-        &obj.arguments
-    }
-    fn get_el_ext<'b>(&self,obj: &'b Self::Viewed)
-                      -> (usize,&'b Self::Element) where Self : 'b {
-        (obj.values.num_elem(),&obj.arguments)
+    fn get_mut<'c>(&self,from: &'c mut Self::From) -> &'c mut Self::To where 'a: 'c {
+        &mut from.allocations
     }
 }
 
-impl<'a,V> ViewMut for ArgumentsView<'a,V>
-    where V : 'a + Bytes+FromConst<'a> {
-    fn get_el_mut<'b>(&self,obj: &'b mut Self::Viewed)
-                      -> &'b mut Self::Element where Self : 'b {
-        &mut obj.arguments
+impl<'a,Em: Embed,V> PathEl<'a,Em> for AllocationsPath<'a,V>
+    where V : 'a + Bytes<'a>+FromConst<'a> {
+    fn read<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        let off = prev.get(prev_from).previous.num_elem();
+        prev.read(prev_from,pos+off,arr,em)
     }
-    fn get_el_mut_ext<'b>(&self,obj: &'b mut Self::Viewed)
-                          -> (usize,&'b mut Self::Element)
-        where Self : 'b {
-        (obj.values.num_elem(),&mut obj.arguments)
+    fn read_slice<'c,Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        len: usize,
+        arr: &'c [Em::Expr])
+        -> Option<&'c [Em::Expr]> {
+        let off = prev.get(prev_from).previous.num_elem();
+        prev.read_slice(prev_from,pos+off,len,arr)
     }
-}
-
-impl<'a,V> View for ActivationView<'a,V>
-    where V : 'a + Bytes+FromConst<'a> {
-    type Viewed = CallFrame<'a,V>;
-    type Element = Activation<'a>;
-    fn get_el<'b>(&self,obj: &'b Self::Viewed)
-                  -> &'b Self::Element where Self : 'b {
-        &obj.activation
+    fn write<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = prev.get(prev_from).previous.num_elem();
+        prev.write(prev_from,pos+off,e,arr,em)
     }
-    fn get_el_ext<'b>(&self,obj: &'b Self::Viewed)
-                      -> (usize,&'b Self::Element) where Self : 'b {
-        (obj.values.num_elem()+
-         obj.arguments.num_elem(),&obj.activation)
-    }
-}
-
-impl<'a,V> ViewMut for ActivationView<'a,V>
-    where V : 'a + Bytes+FromConst<'a> {
-    fn get_el_mut<'b>(&self,obj: &'b mut Self::Viewed)
-                      -> &'b mut Self::Element where Self : 'b {
-        &mut obj.activation
-    }
-    fn get_el_mut_ext<'b>(&self,obj: &'b mut Self::Viewed)
-                          -> (usize,&'b mut Self::Element)
-        where Self : 'b {
-        (obj.values.num_elem()+
-         obj.arguments.num_elem(),&mut obj.activation)
-    }
-}
-
-impl<'a,V> View for PhiView<'a,V>
-    where V : 'a + Bytes+FromConst<'a> {
-    type Viewed = CallFrame<'a,V>;
-    type Element = Phi<'a>;
-    fn get_el<'b>(&self,obj: &'b Self::Viewed)
-                  -> &'b Self::Element where Self : 'b {
-        &obj.phi
-    }
-    fn get_el_ext<'b>(&self,obj: &'b Self::Viewed)
-                      -> (usize,&'b Self::Element) where Self : 'b {
-        (obj.values.num_elem()+
-         obj.arguments.num_elem()+
-         obj.activation.num_elem(),&obj.phi)
+    fn write_slice<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &mut Prev::From,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = prev.get(prev_from).previous.num_elem();
+        prev.write_slice(prev_from,pos+off,old_len,src,trg,em)
     }
 }
 
-impl<'a,V> ViewMut for PhiView<'a,V>
-    where V : 'a + Bytes+FromConst<'a> {
-    fn get_el_mut<'b>(&self,obj: &'b mut Self::Viewed)
-                      -> &'b mut Self::Element where Self : 'b {
-        &mut obj.phi
+impl<'a,V> SimplePathEl<'a> for ValuesPath<'a,V>
+    where V : 'a + Bytes<'a>+FromConst<'a> {
+    type From = CallFrame<'a,V>;
+    type To   = Assoc<&'a String,V>;
+    fn get<'c>(&self,from: &'c Self::From) -> &'c Self::To where 'a: 'c {
+        &from.values
     }
-    fn get_el_mut_ext<'b>(&self,obj: &'b mut Self::Viewed)
-                          -> (usize,&'b mut Self::Element)
-        where Self : 'b {
-        (obj.values.num_elem()+
-         obj.arguments.num_elem()+
-         obj.activation.num_elem(),&mut obj.phi)
+    fn get_mut<'c>(&self,from: &'c mut Self::From) -> &'c mut Self::To where 'a: 'c {
+        &mut from.values
+    }
+}
+
+impl<'a,Em: Embed,V> PathEl<'a,Em> for ValuesPath<'a,V>
+    where V : 'a + Bytes<'a>+FromConst<'a> {
+    fn read<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        prev.read(prev_from,pos,arr,em)
+    }
+    fn read_slice<'c,Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        len: usize,
+        arr: &'c [Em::Expr])
+        -> Option<&'c [Em::Expr]> {
+        prev.read_slice(prev_from,pos,len,arr)
+    }
+    fn write<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write(prev_from,pos,e,arr,em)
+    }
+    fn write_slice<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &mut Prev::From,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write_slice(prev_from,pos,old_len,src,trg,em)
+    }
+}
+
+impl<'a,V> SimplePathEl<'a> for ArgumentsPath<'a,V>
+    where V : 'a + Bytes<'a>+FromConst<'a> {
+    type From = CallFrame<'a,V>;
+    type To   = CompVec<V>;
+    fn get<'c>(&self,from: &'c Self::From) -> &'c Self::To where 'a: 'c {
+        &from.arguments
+    }
+    fn get_mut<'c>(&self,from: &'c mut Self::From) -> &'c mut Self::To where 'a: 'c {
+        &mut from.arguments
+    }
+}
+
+impl<'a,Em: Embed,V> PathEl<'a,Em> for ArgumentsPath<'a,V>
+    where V : 'a + Bytes<'a>+FromConst<'a> {
+    fn read<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        let off = prev.get(prev_from).values.num_elem();
+        prev.read(prev_from,pos+off,arr,em)
+    }
+    fn read_slice<'c,Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        len: usize,
+        arr: &'c [Em::Expr])
+        -> Option<&'c [Em::Expr]> {
+        let off = prev.get(prev_from).values.num_elem();
+        prev.read_slice(prev_from,pos+off,len,arr)
+    }
+    fn write<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = prev.get(prev_from).values.num_elem();
+        prev.write(prev_from,pos+off,e,arr,em)
+    }
+    fn write_slice<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &mut Prev::From,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = prev.get(prev_from).values.num_elem();
+        prev.write_slice(prev_from,pos+off,old_len,src,trg,em)
+    }
+}
+
+impl<'a,V> SimplePathEl<'a> for ActivationPath<'a,V>
+    where V : 'a + Bytes<'a>+FromConst<'a> {
+    type From = CallFrame<'a,V>;
+    type To   = Activation<'a>;
+    fn get<'c>(&self,from: &'c Self::From) -> &'c Self::To where 'a: 'c {
+        &from.activation
+    }
+    fn get_mut<'c>(&self,from: &'c mut Self::From) -> &'c mut Self::To where 'a: 'c {
+        &mut from.activation
+    }
+}
+
+impl<'a,Em: Embed,V> PathEl<'a,Em> for ActivationPath<'a,V>
+    where V : 'a + Bytes<'a>+FromConst<'a> {
+    fn read<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        let off = {
+            let from = prev.get(prev_from);
+            from.values.num_elem() + from.arguments.num_elem()
+        };
+        prev.read(prev_from,pos+off,arr,em)
+    }
+    fn read_slice<'c,Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        len: usize,
+        arr: &'c [Em::Expr])
+        -> Option<&'c [Em::Expr]> {
+        let off = {
+            let from = prev.get(prev_from);
+            from.values.num_elem() + from.arguments.num_elem()
+        };
+        prev.read_slice(prev_from,pos+off,len,arr)
+    }
+    fn write<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = {
+            let from = prev.get(prev_from);
+            from.values.num_elem() + from.arguments.num_elem()
+        };
+        prev.write(prev_from,pos+off,e,arr,em)
+    }
+    fn write_slice<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &mut Prev::From,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = {
+            let from = prev.get(prev_from);
+            from.values.num_elem() + from.arguments.num_elem()
+        };
+        prev.write_slice(prev_from,pos+off,old_len,src,trg,em)
+    }
+}
+
+impl<'a,V> SimplePathEl<'a> for PhiPath<'a,V>
+    where V : 'a + Bytes<'a>+FromConst<'a> {
+    type From = CallFrame<'a,V>;
+    type To   = Phi<'a>;
+    fn get<'c>(&self,from: &'c Self::From) -> &'c Self::To where 'a: 'c {
+        &from.phi
+    }
+    fn get_mut<'c>(&self,from: &'c mut Self::From) -> &'c mut Self::To where 'a: 'c {
+        &mut from.phi
+    }
+}
+
+impl<'a,Em: Embed,V> PathEl<'a,Em> for PhiPath<'a,V>
+    where V : 'a + Bytes<'a>+FromConst<'a> {
+    fn read<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        let off = {
+            let from = prev.get(prev_from);
+            from.values.num_elem()
+                + from.arguments.num_elem()
+                + from.activation.num_elem()
+        };
+        prev.read(prev_from,pos+off,arr,em)
+    }
+    fn read_slice<'c,Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        len: usize,
+        arr: &'c [Em::Expr])
+        -> Option<&'c [Em::Expr]> {
+        let off = {
+            let from = prev.get(prev_from);
+            from.values.num_elem()
+                + from.arguments.num_elem()
+                + from.activation.num_elem()
+        };
+        prev.read_slice(prev_from,pos+off,len,arr)
+    }
+    fn write<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = {
+            let from = prev.get(prev_from);
+            from.values.num_elem()
+                + from.arguments.num_elem()
+                + from.activation.num_elem()
+        };
+        prev.write(prev_from,pos+off,e,arr,em)
+    }
+    fn write_slice<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &mut Prev::From,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = {
+            let from = prev.get(prev_from);
+            from.values.num_elem()
+                + from.arguments.num_elem()
+                + from.activation.num_elem()
+        };
+        prev.write_slice(prev_from,pos+off,old_len,src,trg,em)
     }
 }
 
 #[derive(Clone)]
-pub enum FrameMeaning<'b,V : Semantic+Bytes+FromConst<'b>> {
+pub enum FrameMeaning<'b,V: Semantic+Bytes<'b>+FromConst<'b>> {
     Previous(<PrevFrame<'b> as Semantic>::Meaning),
     Allocations(<Allocations<'b,V> as Semantic>::Meaning)
 }
 
-pub enum FrameMeaningCtx<'b,V : Semantic+Bytes+FromConst<'b>> {
+pub enum FrameMeaningCtx<'b,V: Semantic+Bytes<'b>+FromConst<'b>> {
     Previous(<PrevFrame<'b> as Semantic>::MeaningCtx),
     Allocations(<Allocations<'b,V> as Semantic>::MeaningCtx)
 }
 
-impl<'b,V : Semantic+Bytes+FromConst<'b>> PartialEq for FrameMeaning<'b,V> {
+impl<'b,V : Semantic+Bytes<'b>+FromConst<'b>> PartialEq for FrameMeaning<'b,V> {
     fn eq(&self,other: &FrameMeaning<'b,V>) -> bool {
         match self {
             &FrameMeaning::Previous(ref p) => match other {
@@ -623,9 +847,9 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> PartialEq for FrameMeaning<'b,V> {
     }
 }
 
-impl<'b,V : Semantic+Bytes+FromConst<'b>> Eq for FrameMeaning<'b,V> {}
+impl<'b,V : Semantic+Bytes<'b>+FromConst<'b>> Eq for FrameMeaning<'b,V> {}
 
-impl<'b,V : Semantic+Bytes+FromConst<'b>> PartialOrd for FrameMeaning<'b,V> {
+impl<'b,V : Semantic+Bytes<'b>+FromConst<'b>> PartialOrd for FrameMeaning<'b,V> {
     fn partial_cmp(&self,other: &FrameMeaning<'b,V>) -> Option<Ordering> {
         match (self,other) {
             (&FrameMeaning::Previous(ref p),
@@ -638,7 +862,7 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> PartialOrd for FrameMeaning<'b,V> {
     }
 }
 
-impl<'b,V : Semantic+Bytes+FromConst<'b>> Ord for FrameMeaning<'b,V> {
+impl<'b,V : Semantic+Bytes<'b>+FromConst<'b>> Ord for FrameMeaning<'b,V> {
     fn cmp(&self,other: &FrameMeaning<'b,V>) -> Ordering {
         match (self,other) {
             (&FrameMeaning::Previous(ref p),
@@ -651,7 +875,7 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> Ord for FrameMeaning<'b,V> {
     }
 }
 
-impl<'b,V : Semantic+Bytes+FromConst<'b>> Hash for FrameMeaning<'b,V> {
+impl<'b,V : Semantic+Bytes<'b>+FromConst<'b>> Hash for FrameMeaning<'b,V> {
     fn hash<H>(&self, state: &mut H) where H: Hasher {
         match self {
             &FrameMeaning::Previous(ref p) => {
@@ -666,7 +890,7 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> Hash for FrameMeaning<'b,V> {
     }
 }
 
-impl<'b,V : Semantic+Bytes+FromConst<'b>> fmt::Debug for FrameMeaning<'b,V> {
+impl<'b,V : Semantic+Bytes<'b>+FromConst<'b>> fmt::Debug for FrameMeaning<'b,V> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         match self {
             &FrameMeaning::Previous(ref p) => f.debug_tuple("Previous")
@@ -677,7 +901,7 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> fmt::Debug for FrameMeaning<'b,V> {
     }
 }
 
-impl<'b,V : Semantic+Bytes+FromConst<'b>> FrameMeaning<'b,V> {
+impl<'b,V : Semantic+Bytes<'b>+FromConst<'b>> FrameMeaning<'b,V> {
     pub fn is_pc(&self) -> bool {
         match self {
             &FrameMeaning::Previous(_) => true,
@@ -686,7 +910,7 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> FrameMeaning<'b,V> {
     }
 }
 
-impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for Frame<'b,V> {
+impl<'b,V : Semantic+Bytes<'b>+FromConst<'b>> Semantic for Frame<'b,V> {
     type Meaning = FrameMeaning<'b,V>;
     type MeaningCtx = FrameMeaningCtx<'b,V>;
     fn meaning(&self,n: usize) -> Self::Meaning {
@@ -754,19 +978,19 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for Frame<'b,V> {
 #[derive(Clone)]
 pub enum CallFrameMeaning<'b,V : Semantic+HasSorts> {
     Values(<Assoc<&'b String,V> as Semantic>::Meaning),
-    Arguments(<Vec<V> as Semantic>::Meaning),
+    Arguments(<CompVec<V> as Semantic>::Meaning),
     Activation(<Activation<'b> as Semantic>::Meaning),
     Phi(<Choice<Data<&'b String>> as Semantic>::Meaning)
 }
 
 pub enum CallFrameMeaningCtx<'b,V : Semantic+HasSorts> {
     Values(<Assoc<&'b String,V> as Semantic>::MeaningCtx),
-    Arguments(<Vec<V> as Semantic>::MeaningCtx),
+    Arguments(<CompVec<V> as Semantic>::MeaningCtx),
     Activation(<Activation<'b> as Semantic>::MeaningCtx),
     Phi(<Choice<Data<&'b String>> as Semantic>::MeaningCtx)
 }
 
-impl<'b,V : Semantic+HasSorts> PartialEq for CallFrameMeaning<'b,V> {
+impl<'b,V: Semantic+HasSorts> PartialEq for CallFrameMeaning<'b,V> {
     fn eq(&self,other: &CallFrameMeaning<'b,V>) -> bool {
         match self {
             &CallFrameMeaning::Values(ref p) => match other {
@@ -789,15 +1013,15 @@ impl<'b,V : Semantic+HasSorts> PartialEq for CallFrameMeaning<'b,V> {
     }
 }
 
-impl<'b,V : Semantic+HasSorts> Eq for CallFrameMeaning<'b,V> {}
+impl<'b,V: Semantic+HasSorts> Eq for CallFrameMeaning<'b,V> {}
 
-impl<'b,V : Semantic+HasSorts> PartialOrd for CallFrameMeaning<'b,V> {
+impl<'b,V: Semantic+HasSorts> PartialOrd for CallFrameMeaning<'b,V> {
     fn partial_cmp(&self,other: &CallFrameMeaning<'b,V>) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<'b,V : Semantic+HasSorts> Ord for CallFrameMeaning<'b,V> {
+impl<'b,V: Semantic+HasSorts> Ord for CallFrameMeaning<'b,V> {
     fn cmp(&self,other: &CallFrameMeaning<'b,V>) -> Ordering {
         match (self,other) {
             (&CallFrameMeaning::Values(ref p),
@@ -818,7 +1042,7 @@ impl<'b,V : Semantic+HasSorts> Ord for CallFrameMeaning<'b,V> {
     }
 }
 
-impl<'b,V : Semantic+HasSorts> Hash for CallFrameMeaning<'b,V> {
+impl<'b,V: Semantic+HasSorts> Hash for CallFrameMeaning<'b,V> {
     fn hash<H>(&self, state: &mut H) where H: Hasher {
         match self {
             &CallFrameMeaning::Values(ref p) => {
@@ -841,7 +1065,7 @@ impl<'b,V : Semantic+HasSorts> Hash for CallFrameMeaning<'b,V> {
     }
 }
 
-impl<'b,V : Semantic+HasSorts> fmt::Debug for CallFrameMeaning<'b,V> {
+impl<'b,V: Semantic+HasSorts> fmt::Debug for CallFrameMeaning<'b,V> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         match self {
             &CallFrameMeaning::Values(ref p) => f.debug_tuple("Values")
@@ -856,7 +1080,7 @@ impl<'b,V : Semantic+HasSorts> fmt::Debug for CallFrameMeaning<'b,V> {
     }
 }
 
-impl<'b,V : Semantic+HasSorts> CallFrameMeaning<'b,V> {
+impl<'b,V: Semantic+HasSorts> CallFrameMeaning<'b,V> {
     pub fn is_pc(&self) -> bool {
         match self {
             &CallFrameMeaning::Activation(_) => true,
@@ -866,7 +1090,7 @@ impl<'b,V : Semantic+HasSorts> CallFrameMeaning<'b,V> {
     }
 }
 
-impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for CallFrame<'b,V> {
+impl<'b,V: Semantic+Bytes<'b>+FromConst<'b>> Semantic for CallFrame<'b,V> {
     type Meaning = CallFrameMeaning<'b,V>;
     type MeaningCtx = CallFrameMeaningCtx<'b,V>;
     fn meaning(&self,pos: usize) -> Self::Meaning {

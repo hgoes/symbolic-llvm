@@ -1,30 +1,35 @@
-extern crate smtrs;
-extern crate llvm_ir;
-
-use self::smtrs::composite::*;
-use self::smtrs::embed::{Embed};
-use self::smtrs::expr;
+use smtrs::composite::*;
+use smtrs::composite::vec::*;
+use smtrs::embed::{Embed};
+use smtrs::expr;
 use std::cmp::{Ordering,max};
-use self::llvm_ir::datalayout::DataLayout;
-use self::llvm_ir::types::{Type as LLVMType};
+use llvm_ir::datalayout::DataLayout;
+use llvm_ir::types::{Type as LLVMType};
+use llvm_ir;
 use std::collections::HashMap;
 use std::hash::{Hash,Hasher};
 use super::pointer::Offset;
 use std::fmt::Debug;
 use std::fmt;
+use std::mem::swap;
+use std::marker::PhantomData;
 
-pub trait Bytes : Composite {
+pub trait Bytes<'a>: Composite<'a> {
     fn byte_width(&self) -> usize;
-    fn extract_bytes<'a,Em : Embed>(OptRef<'a,Self>,Transf<Em>,usize,usize,&mut Em)
-                                    -> Result<Option<(OptRef<'a,Self>,Transf<Em>)>,Em::Error> {
+    fn extract_bytes<Em: Embed,P: Path<'a,Em,To=Self>>(
+        &P,&P::From,&[Em::Expr],
+        usize,usize,
+        &mut Vec<Em::Expr>,
+        &mut Em
+    ) -> Result<Option<Self>,Em::Error> {
         Ok(None)
     }
-    fn concat_bytes<'a,Em : Embed>(OptRef<'a,Self>,
-                                   Transf<Em>,
-                                   OptRef<'a,Self>,
-                                   Transf<Em>,
-                                   &mut Em)
-                                   -> Result<Option<(OptRef<'a,Self>,Transf<Em>)>,Em::Error> {
+    fn concat_bytes<Em: Embed,P1: Path<'a,Em,To=Self>,P2: Path<'a,Em,To=Self>>(
+        &P1,&P1::From,&[Em::Expr],
+        &P2,&P2::From,&[Em::Expr],
+        &mut Vec<Em::Expr>,
+        &mut Em
+    ) -> Result<Option<Self>,Em::Error> {
         Ok(None)
     }
 }
@@ -40,18 +45,21 @@ pub enum MemObj<'a,V> {
 }
 
 #[derive(PartialEq,Eq,Hash,Clone,Debug)]
-pub struct MemSlice<'a,V>(pub Vec<MemObj<'a,V>>);
+pub struct MemSlice<'a,V>(pub CompVec<MemObj<'a,V>>);
 
-pub trait FromConst<'a> : Composite {
-    fn from_const<Em : Embed>(&'a DataLayout,
-                              &'a llvm_ir::Constant,
-                              &'a LLVMType,
-                              &'a HashMap<String,LLVMType>,
-                              &mut Em)
-                              -> Result<Option<(Self,Transf<Em>)>,Em::Error>;
+pub struct MemObjs<'a,V>(PhantomData<(&'a (),V)>);
+
+pub trait FromConst<'a>: Composite<'a> {
+    fn from_const<Em: Embed>(&'a DataLayout,
+                             &'a llvm_ir::Constant,
+                             &'a LLVMType,
+                             &'a HashMap<String,LLVMType>,
+                             &mut Vec<Em::Expr>,
+                             &mut Em)
+                             -> Result<Option<Self>,Em::Error>;
 }
 
-impl<'a,V : Debug> Debug for MemObj<'a,V> {
+impl<'a,V: Debug> Debug for MemObj<'a,V> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         match *self {
             MemObj::FreshObj(ref sz) => f.debug_tuple("FreshObj")
@@ -64,67 +72,99 @@ impl<'a,V : Debug> Debug for MemObj<'a,V> {
     }
 }
 
-impl<'a,V : Bytes+FromConst<'a>+Clone+Debug> MemSlice<'a,V> {
-    pub fn alloca<Em : Embed>(sz: usize,_: &mut Em) -> (Self,Transf<Em>) {
-        (MemSlice(vec![MemObj::FreshObj(sz)]),
-         Transformation::id(0))
+impl<'a,V : Bytes<'a>+FromConst<'a>+Clone+Debug> MemSlice<'a,V> {
+    pub fn objects() -> MemObjs<'a,V> {
+        MemObjs(PhantomData)
     }
-    pub fn realloc(&mut self,sz: usize) {
-        let csz = self.byte_width();
+    pub fn alloca<Em: Embed>(sz: usize,
+                             res: &mut Vec<Em::Expr>,
+                             em: &mut Em) -> Result<Self,Em::Error> {
+        let mut vec0 = CompVec::new(res,em)?;
+        CompVec::push(&Id::new(),&mut vec0,res,
+                      MemObj::FreshObj(sz),
+                      &mut Vec::new(),
+                      em)?;
+        Ok(MemSlice(vec0))
+    }
+    pub fn realloc<Em: Embed,P: Path<'a,Em,To=Self>>(
+        path: P,
+        from: &mut P::From,
+        arr:  &mut Vec<Em::Expr>,
+        sz:   usize,
+        em:   &mut Em
+    ) -> Result<(),Em::Error> {
+        let csz = path.get(from).byte_width();
         if sz==csz {
-            return
+            return Ok(())
         }
         if sz < csz {
             panic!("Making slices smaller not yet supported")
         }
-        self.0.push(MemObj::FreshObj(sz-csz))
+        CompVec::push(&path.then(MemSlice::objects()),
+                      from,arr,
+                      MemObj::FreshObj(sz-csz),
+                      &mut Vec::new(),em)
     }
     pub fn is_free(&self) -> bool {
         false
     }
     pub fn byte_width(&self) -> usize {
         let mut bw = 0;
-        for obj in self.0.iter() {
-            bw+=obj.byte_width()
+        for i in 0..self.0.len() {
+            bw += self.0[i].byte_width()
         }
         bw
     }
-    pub fn read_static<'b,Em>(sl: OptRef<'b,Self>,
-                              inp_sl: Transf<Em>,
-                              off: usize,
-                              len: usize,
-                              em: &mut Em)
-                              -> Result<Option<(OptRef<'b,V>,Transf<Em>)>,Em::Error>
-        where Em : Embed {
+    pub fn read_static<Em: Embed,P: Path<'a,Em,To=Self>>(
+        path: &P,
+        from: &P::From,
+        src:  &[Em::Expr],
+        off: usize,
+        len: usize,
+        res: &mut Vec<Em::Expr>,
+        em: &mut Em
+    )  -> Result<Option<V>,Em::Error> {
         //println!("Reading at {} with len {} from {:#?}",off,len,sl.as_ref());
+        let mut buf = Vec::new();
+        let mut buf2 = Vec::new();
         let mut acc = 0;
-        let vec = match sl {
-            OptRef::Ref(ref rsl) => OptRef::Ref(&rsl.0),
-            OptRef::Owned(rsl) => OptRef::Owned(rsl.0)
-        };
-        let mut it = vec_iter(vec,inp_sl);
-        while let Some((obj,obj_inp)) = it.next() {
-            let bw = obj.as_ref().byte_width();
+        for n in 0..path.get(from).0.len() {
+            let obj_path = path.clone()
+                .then(Self::objects())
+                .then(CompVec::element(n));
+            let bw = obj_path.get(from).byte_width();
             if off<acc+bw {
                 if off==acc && bw==len {
-                    return MemObj::as_value(obj,obj_inp,em)
+                    return MemObj::as_value(&obj_path,from,src,res,em)
                 }
                 if off-acc+len<=bw {
-                    return match MemObj::as_value(obj,obj_inp,em)? {
+                    return match MemObj::as_value(&obj_path,from,src,
+                                                  &mut buf,em)? {
                         None => panic!("Reading from uninitialized memory at {}, previous element {}",off,acc),//Ok(None),
-                        Some((sobj,sobj_inp))
-                            => V::extract_bytes(sobj,sobj_inp,off-acc,len,em)
+                        Some(sobj) => {
+                            V::extract_bytes(&Id::new(),&sobj,
+                                             &buf[..],
+                                             off-acc,len,
+                                             res,em)
+                        }
                     }
                 }
-                let (start,inp_start) = {
-                    match MemObj::as_value(obj,obj_inp,em)? {
+                let start = {
+                    match MemObj::as_value(&obj_path,from,src,&mut buf,em)? {
                         None => panic!("Reading from uninitialized memory"),//return Ok(None),
-                        Some((val0,val0_inp)) => if off==acc {
-                            (val0,val0_inp)
+                        Some(val0) => if off==acc {
+                            val0
                         } else {
-                            match V::extract_bytes(val0,val0_inp,off-acc,bw+acc-off,em)? {
+                            match V::extract_bytes(&Id::new(),&val0,
+                                                   &buf[..],
+                                                   off-acc,bw+acc-off,
+                                                   &mut buf2,em)? {
                                 None => panic!("Failed to extract bytes"),//return Ok(None),
-                                Some(res) => res
+                                Some(res) => {
+                                    swap(&mut buf,&mut buf2);
+                                    buf2.clear();
+                                    res
+                                }
                             }
                         }
                     }
@@ -132,26 +172,42 @@ impl<'a,V : Bytes+FromConst<'a>+Clone+Debug> MemSlice<'a,V> {
                 acc+=bw;
                 let rest = len+acc-off;
                 let mut cur = start;
-                let mut cur_inp = inp_start;
-                while let Some((obj,obj_inp)) = it.next() {
-                    let bw = obj.as_ref().byte_width();
-                    let (val,val_inp) = match MemObj::as_value(obj,obj_inp,em)? {
+                for m in n..path.get(from).0.len() {
+                    let obj_path = path.clone()
+                        .then(Self::objects())
+                        .then(CompVec::element(m));
+                    let bw = obj_path.get(from).byte_width();
+                    let cpos = buf.len();
+                    let val = match MemObj::as_value(&obj_path,from,src,
+                                                     &mut buf,em)? {
                         None => panic!("Reading from uninitialized memory"),//return Ok(None),
                         Some(res) => res
                     };
                     if rest<bw {
-                        let (rval,rval_inp) = match V::extract_bytes(val,val_inp,0,rest,em)? {
+                        let rval = match V::extract_bytes(&Id::new(),
+                                                          &val,
+                                                          &buf[cpos..],
+                                                          0,rest,
+                                                          &mut buf2,em)? {
                             None => panic!("Reading from uninitialized memory"),//return Ok(None),
                             Some(res) => res
                         };
-                        return V::concat_bytes(cur,cur_inp,rval,rval_inp,em)
+                        return V::concat_bytes(&Id::new(),
+                                               &cur,&buf[0..cpos],
+                                               &Id::new(),
+                                               &rval,&buf2,
+                                               res,em)
                     }
-                    let (ncur,ncur_inp) = match V::concat_bytes(cur,cur_inp,val,val_inp,em)? {
+                    let ncur = match V::concat_bytes(
+                        &Id::new(),&cur,&buf[0..cpos],
+                        &Id::new(),&val,&buf[cpos..],
+                        &mut buf2,em)? {
                         None => panic!("Cannot concat bytes"),//return Ok(None),
                         Some(res) => res
                     };
+                    buf.clear();
+                    swap(&mut buf,&mut buf2);
                     cur = ncur;
-                    cur_inp = ncur_inp;
                     acc+=bw;
                 }
                 return panic!("Overread")//Ok(None)
@@ -160,9 +216,32 @@ impl<'a,V : Bytes+FromConst<'a>+Clone+Debug> MemSlice<'a,V> {
         }
         panic!("Overread") //Ok(None)
     }
-    pub fn read<'b,Em : Embed>(sl: OptRef<'b,Self>,
-                               inp_sl: Transf<Em>,
-                               off: OptRef<'b,Offset>,
+    pub fn read<Em: Embed,
+                P: Path<'a,Em,To=Self>,
+                POff: Path<'a,Em,To=Offset>>(
+        path: &P,
+        from: &P::From,
+        src:  &[Em::Expr],
+        path_off: &POff,
+        from_off: &POff::From,
+        src_off:  &[Em::Expr],
+        len: usize,
+        res: &mut Vec<Em::Expr>,
+        em: &mut Em
+    ) -> Result<Option<V>,Em::Error> {
+        let off = path_off.get(from_off);
+        let (mult,stat_off) = (off.0).0;
+        match off.1 {
+            None => Self::read_static(path,from,src,
+                                      stat_off,len,res,em),
+            Some(_) => Ok(None)
+        }
+    }
+    /*pub fn read<Em: Embed,P: Path<'a,Em,To=Self>>(
+        path: &P,
+        from: &P::From,
+        src:  &[Em::Expr],
+        off: OptRef<'b,Offset>,
                                inp_off: Transf<Em>,
                                len: usize,
                                em: &mut Em)
@@ -309,18 +388,27 @@ impl<'a,V : Bytes+FromConst<'a>+Clone+Debug> MemSlice<'a,V> {
             None => self.write_static(inp_sl,stat_off,val,val_inp,em),
             _ => unimplemented!()
         }
-    }
-                 
+    }*/          
 }
 
-impl<'a,V : Bytes+FromConst<'a>> MemObj<'a,V> {
-    pub fn num_elem(&self) -> usize {
+impl<'a,V: HasSorts> HasSorts for MemObj<'a,V> {
+    fn num_elem(&self) -> usize {
         match self {
             &MemObj::FreshObj(_) => 0,
             &MemObj::ConstObj(_,_,_,_) => 0,
             &MemObj::ValueObj(ref v) => v.num_elem()
         }
     }
+    fn elem_sort<Em: Embed>(&self,n: usize,em: &mut Em)
+                            -> Result<Em::Sort,Em::Error> {
+        match self {
+            &MemObj::ValueObj(ref v) => v.elem_sort(n,em),
+            _ => unreachable!()
+        }
+    }
+}
+
+impl<'a,V: Bytes<'a>+FromConst<'a>> MemObj<'a,V> {
     pub fn byte_width(&self) -> usize {
         match self {
             &MemObj::FreshObj(w) => w,
@@ -335,141 +423,155 @@ impl<'a,V : Bytes+FromConst<'a>> MemObj<'a,V> {
             &MemObj::ValueObj(ref v) => v.byte_width()
         }
     }
-    pub fn as_value<'b,Em : Embed>(obj: OptRef<'b,Self>,
-                                   inp: Transf<Em>,
-                                   em: &mut Em)
-                                -> Result<Option<(OptRef<'b,V>,Transf<Em>)>,Em::Error> {
+    pub fn as_value<'b,Em: Embed,P: Path<'b,Em,To=Self>>(
+        path: &P,
+        from: &P::From,
+        arr:  &[Em::Expr],
+        res:  &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<Option<V>,Em::Error> {
+        let obj = path.get(from);
         match obj {
-            OptRef::Ref(&MemObj::FreshObj(_)) |
-            OptRef::Owned(MemObj::FreshObj(_)) => Ok(None),
-            OptRef::Ref(&MemObj::ConstObj(ref dl,ref c,ref tp,ref tps)) => {
-                let res = V::from_const(dl,c,tp,tps,em)?;
+            &MemObj::FreshObj(_) => Ok(None),
+            &MemObj::ConstObj(ref dl,ref c,ref tp,ref tps) => {
+                let res = V::from_const(dl,c,tp,tps,res,em)?;
                 match res {
                     None => Ok(None),
-                    Some((x,inp_x)) => Ok(Some((OptRef::Owned(x),inp_x)))
+                    Some(x) => Ok(Some(x))
                 }
             },
-            OptRef::Owned(MemObj::ConstObj(dl,c,tp,tps)) => {
-                let res = V::from_const(dl,c,tp,tps,em)?;
-                match res {
-                    None => Ok(None),
-                    Some((x,inp_x)) => Ok(Some((OptRef::Owned(x),inp_x)))
-                }
-            },
-            OptRef::Ref(&MemObj::ValueObj(ref v))
-                => Ok(Some((OptRef::Ref(v),inp))),
-            OptRef::Owned(MemObj::ValueObj(v))
-                => Ok(Some((OptRef::Owned(v),inp)))
+            &MemObj::ValueObj(ref v) => {
+                path.read_into(from,0,v.num_elem(),arr,res,em)?;
+                Ok(Some(v.clone()))
+            }
         }
     }
 }
 
 impl<'a,V : HasSorts> HasSorts for MemSlice<'a,V> {
     fn num_elem(&self) -> usize {
-        self.0.iter().map(|obj| match *obj {
-            MemObj::FreshObj(_) => 0,
-            MemObj::ConstObj(_,_,_,_) => 0,
-            MemObj::ValueObj(ref v) => v.num_elem()
-        }).sum()
+        self.0.num_elem()
     }
     fn elem_sort<Em : Embed>(&self,pos: usize,em: &mut Em)
                              -> Result<Em::Sort,Em::Error> {
-        let mut off = 0;
-        for obj in self.0.iter() {
-            match *obj {
-                MemObj::FreshObj(_) => {},
-                MemObj::ConstObj(_,_,_,_) => {},
-                MemObj::ValueObj(ref v) => {
-                    let sz = v.num_elem();
-                    if pos < off+sz {
-                        return v.elem_sort(pos-off,em)
-                    }
-                    off+=sz
-                }
-            }
-        }
-        panic!("Invalid index: {}",pos)
+        self.0.elem_sort(pos,em)
     }
 }
 
-impl<'a,V : Bytes+FromConst<'a>> Composite for MemSlice<'a,V> {
-    fn combine<'b,Em,FComb,FL,FR>(x: OptRef<'b,Self>,y: OptRef<'b,Self>,
-                                  inp_x: Transf<Em>,inp_y: Transf<Em>,
-                                  comb: &FComb,only_l: &FL,only_r: &FR,em: &mut Em)
-                                  -> Result<Option<(OptRef<'b,Self>,Transf<Em>)>,Em::Error>
-        where Em : Embed,
-              FComb : Fn(Transf<Em>,Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
-              FL : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
-              FR : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error> {
+impl<'a,V: Bytes<'a>+FromConst<'a>+Debug> Composite<'a> for MemSlice<'a,V> {
+    fn combine<Em,PL,PR,FComb,FL,FR>(
+        pl: &PL,froml: &PL::From,arrl: &[Em::Expr],
+        pr: &PR,fromr: &PR::From,arrr: &[Em::Expr],
+        comb: &FComb,only_l: &FL,only_r: &FR,
+        res: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<Option<Self>,Em::Error>
+        where
+        Em: Embed,
+        PL: Path<'a,Em,To=Self>,
+        PR: Path<'a,Em,To=Self>,
+        FComb: Fn(Em::Expr,Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
+        FL: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
+        FR: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error> {
 
+        let lhs = pl.get(froml);
+        let rhs = pr.get(fromr);
+        
         let mut pos_x = 0;
         let mut pos_y = 0;
-        let mut off_x = 0;
-        let mut off_y = 0;
-        let mut nslice = Vec::with_capacity(max(x.as_ref().0.len(),y.as_ref().0.len()));
-        let mut ninp = Vec::with_capacity(max(x.as_ref().0.len(),y.as_ref().0.len()));
-        let mut cur_x : Option<(MemObj<V>,Transf<Em>)> = None;
-        let mut cur_y : Option<(MemObj<V>,Transf<Em>)> = None;
+
+        let mut cur_x: Option<MemObj<V>> = None;
+        let mut buf_x: Vec<Em::Expr> = Vec::new();
+        let mut cur_y: Option<MemObj<V>> = None;
+        let mut buf_y: Vec<Em::Expr> = Vec::new();
+
+        let mut outp = CompVec::new(res,em)?;
+        
         loop {
-            let rcur_x = match cur_x {
+            let x = match cur_x.take() {
                 None => {
-                    if pos_x >= x.as_ref().0.len() {
-                        if let Some((obj,inp)) = cur_y {
-                            off_y += inp.size();
-                            nslice.push(obj);
-                            ninp.push(inp);
+                    if pos_x >= lhs.0.len() {
+                        match cur_y.take() {
+                            None => {},
+                            Some(y) => {
+                                for e in buf_y.iter_mut() {
+                                    *e = only_r(e.clone(),em)?;
+                                }
+                                CompVec::push(&Id::new(),&mut outp,
+                                              res,y,&mut buf_y,em)?;
+                                buf_y.clear();
+                            }
                         }
-                        nslice.extend_from_slice(&y.as_ref().0[pos_y..]);
-                        ninp.push(Transformation::view(off_y,inp_y.size()-off_y,inp_y));
+                        for i in pos_y..rhs.0.len() {
+                            let cpos = res.len();
+                            let path_el = pr.clone()
+                                .then(Self::objects())
+                                .then(CompVec::element(i));
+                            let el = path_el.get(fromr);
+                            path_el.read_into(fromr,0,el.num_elem(),arrr,res,em)?;
+                            for i in cpos..res.len() {
+                                res[i] = only_r(res[i].clone(),em)?;
+                            }
+                        }
                         break
                     }
-                    let res = x.as_ref().0[pos_x].clone();
-                    let sz = res.num_elem();
-                    let inp = Transformation::view(off_x,sz,inp_x.clone());
+                    let path_el = pl.clone()
+                        .then(Self::objects())
+                        .then(CompVec::element(pos_x));
+                    let el = path_el.get(froml);
+                    let len = el.num_elem();
+                    path_el.read_into(froml,0,len,arrl,&mut buf_x,em)?;
                     pos_x+=1;
-                    off_x+=sz;
-                    (res,inp)
+                    el.clone()
                 },
-                Some(r) => r
+                Some(el) => el
             };
-            let rcur_y = match cur_y {
+            let y = match cur_y.take() {
                 None => {
-                    if pos_y >= y.as_ref().0.len() {
-                        off_x += rcur_x.1.size();
-                        nslice.push(rcur_x.0);
-                        ninp.push(rcur_x.1);
-                        nslice.extend_from_slice(&x.as_ref().0[pos_x..]);
-                        ninp.push(Transformation::view(off_x,inp_x.size()-off_x,inp_x));
+                    if pos_y >= rhs.0.len() {
+                        CompVec::push(&Id::new(),&mut outp,
+                                      res,x,&mut buf_x,em)?;
+                        buf_x.clear();
+                        for i in pos_x..lhs.0.len() {
+                            let cpos = res.len();
+                            let path_el = pl.clone()
+                                .then(Self::objects())
+                                .then(CompVec::element(i));
+                            let el = path_el.get(froml);
+                            path_el.read_into(froml,0,el.num_elem(),arrl,res,em)?;
+                            for i in cpos..res.len() {
+                                res[i] = only_l(res[i].clone(),em)?;
+                            }
+                        }
                         break
                     }
-                    let res = y.as_ref().0[pos_y].clone();
-                    let sz = res.num_elem();
-                    let inp = Transformation::view(off_y,sz,inp_y.clone());
+                    let path_el = pr.clone()
+                        .then(Self::objects())
+                        .then(CompVec::element(pos_y));
+                    let el = path_el.get(fromr);
+                    let len = el.num_elem();
+                    path_el.read_into(fromr,0,len,arrr,&mut buf_y,em)?;
                     pos_y+=1;
-                    off_y+=sz;
-                    (res,inp)
+                    el.clone()
                 },
-                Some(r) => r
+                Some(el) => el
             };
-            match rcur_x.0 {
-                MemObj::FreshObj(w1) => match rcur_y.0 {
+            match x {
+                MemObj::FreshObj(w1) => match y {
                     MemObj::FreshObj(w2) => match w1.cmp(&w2) {
                         Ordering::Equal => {
-                            nslice.push(MemObj::FreshObj(w1));
-                            cur_x = None;
-                            cur_y = None;
+                            CompVec::push(&Id::new(),&mut outp,
+                                          res,x,&mut buf_x,em)?;
                         },
                         Ordering::Less => {
-                            nslice.push(MemObj::FreshObj(w1));
-                            cur_x = None;
-                            cur_y = Some((MemObj::FreshObj(w2-w1),
-                                          Transformation::id(0)));
+                            CompVec::push(&Id::new(),&mut outp,
+                                          res,x,&mut buf_x,em)?;
+                            cur_y = Some(MemObj::FreshObj(w2-w1));
                         },
                         Ordering::Greater => {
-                            nslice.push(MemObj::FreshObj(w2));
-                            cur_x = Some((MemObj::FreshObj(w1-w2),
-                                          Transformation::id(0)));
-                            cur_y = None;
+                            CompVec::push(&Id::new(),&mut outp,
+                                          res,y,&mut buf_y,em)?;
+                            cur_x = Some(MemObj::FreshObj(w1-w2));
                         }
                     },
                     MemObj::ConstObj(_,_,_,_) => return Ok(None),
@@ -477,248 +579,219 @@ impl<'a,V : Bytes+FromConst<'a>> Composite for MemSlice<'a,V> {
                         let w2 = v2.byte_width();
                         match w1.cmp(&w2) {
                             Ordering::Equal => {
-                                nslice.push(MemObj::ValueObj(v2.clone()));
-                                ninp.push(rcur_y.1);
-                                cur_x = None;
-                                cur_y = None;
+                                CompVec::push(&Id::new(),&mut outp,
+                                              res,y.clone(),&mut buf_y,em)?;
+                                buf_y.clear();
                             },
-                            Ordering::Less => match V::extract_bytes(OptRef::Ref(v2),rcur_y.1.clone(),0,w1,em)? {
+                            Ordering::Less => match V::extract_bytes(&Id::new(),&v2,&buf_y[..],0,w1,
+                                                                     &mut buf_x,em)? {
                                 None => return Ok(None),
-                                Some((spl1,inp1)) => match V::extract_bytes(OptRef::Ref(v2),rcur_y.1,w1,v2.byte_width()-w1,em)? {
-                                    None => return Ok(None),
-                                    Some((spl2,inp2)) => {
-                                        nslice.push(MemObj::ValueObj(spl1.as_obj()));
-                                        ninp.push(inp1);
-                                        cur_x = None;
-                                        cur_y = Some((MemObj::ValueObj(spl2.as_obj()),inp2));
+                                Some(spl1) => {
+                                    // buf_x contains spl1
+                                    let len_spl1 = buf_x.len();
+                                    match V::extract_bytes(&Id::new(),&v2,&buf_y[..],w1,w2-w1,
+                                                           &mut buf_x,em)? {
+                                        None => return Ok(None),
+                                        Some(spl2) => {
+                                            // buf_x contains spl1+spl2
+                                            CompVec::push(&Id::new(),&mut outp,
+                                                          res,MemObj::ValueObj(spl1),
+                                                          &mut buf_x,em)?;
+                                            buf_x.drain(0..len_spl1);
+                                            // buf_x contains spl2
+                                            cur_y = Some(MemObj::ValueObj(spl2));
+                                            swap(&mut buf_x,&mut buf_y);
+                                        }
                                     }
                                 }
                             },
                             Ordering::Greater => {
-                                nslice.push(MemObj::ValueObj(v2.clone()));
-                                ninp.push(rcur_y.1);
-                                cur_x = Some((MemObj::FreshObj(w1-v2.byte_width()),
-                                              Transformation::id(0)));
-                                cur_y = None;
+                                CompVec::push(&Id::new(),&mut outp,
+                                              res,y.clone(),&mut buf_y,em)?;
+                                buf_y.clear();
+                                cur_x = Some(MemObj::FreshObj(w1-w2));
                             }
                         }
                     }
                 },
-                MemObj::ConstObj(dl,c,tp,tps) => match rcur_y.0 {
+                MemObj::ConstObj(dl,c,tp,tps) => match y {
                     MemObj::FreshObj(_) => return Ok(None),
                     MemObj::ConstObj(_,nc,ntp,_) => if c==nc {
-                        nslice.push(MemObj::ConstObj(dl,c,tp,tps));
-                        cur_x = None;
-                        cur_y = None;
+                        CompVec::push(&Id::new(),&mut outp,
+                                      res,x.clone(),&mut buf_x,em)?;
                     } else {
-                        let (v1,inp_v1) = match V::from_const(dl,c,tp,tps,em)? {
+                        cur_x = match V::from_const(dl,c,tp,tps,
+                                                    &mut buf_x,em)? {
                             None => return Ok(None),
-                            Some(r) => r
+                            Some(r) => Some(MemObj::ValueObj(r))
                         };
-                        let (v2,inp_v2) = match V::from_const(dl,nc,ntp,tps,em)? {
+                        cur_y = match V::from_const(dl,nc,ntp,tps,
+                                                    &mut buf_y,em)? {
                             None => return Ok(None),
-                            Some(r) => r
+                            Some(r) => Some(MemObj::ValueObj(r))
                         };
+                    },
+                    MemObj::ValueObj(v2) => {
+                        cur_x = match V::from_const(dl,c,tp,tps,
+                                                    &mut buf_x,em)? {
+                            None => return Ok(None),
+                            Some(r) => Some(MemObj::ValueObj(r))
+                        };
+                    }
+                },
+                MemObj::ValueObj(ref v1) => match y {
+                    MemObj::FreshObj(w2) => {
                         let w1 = v1.byte_width();
-                        let w2 = v2.byte_width();
-                        match w1.cmp(&w2) {
-                            Ordering::Equal
-                                => match V::combine(OptRef::Owned(v1),
-                                                    OptRef::Owned(v2),
-                                                    inp_v1,
-                                                    inp_v2,
-                                                    comb,only_l,only_r,em)? {
-                                    None => return Ok(None),
-                                    Some((nv,inp)) => {
-                                        nslice.push(MemObj::ValueObj(nv.as_obj()));
-                                        ninp.push(inp);
-                                        cur_x = None;
-                                        cur_y = None;
-                                    }
-                                },
-                            Ordering::Less => match V::extract_bytes(OptRef::Ref(&v2),inp_v2.clone(),0,w1,em)? {
+                        match w2.cmp(&w1) {
+                            Ordering::Equal => {
+                                for i in 0..buf_x.len() {
+                                    buf_x[i] = only_l(buf_x[i].clone(),em)?;
+                                }
+                                CompVec::push(&Id::new(),&mut outp,
+                                              res,x.clone(),&mut buf_x,em)?;
+                                buf_x.clear();
+                            },
+                            Ordering::Less => match V::extract_bytes(&Id::new(),&v1,&buf_x[..],0,w2,
+                                                                     &mut buf_y,em)? {
                                 None => return Ok(None),
-                                Some((spl1,inp1)) => match V::extract_bytes(OptRef::Ref(&v2),inp_v2,w1,w2-w1,em)? {
-                                    None => return Ok(None),
-                                    Some((spl2,inp2)) => match V::combine(OptRef::Owned(v1),spl1,
-                                                                          inp_v1,inp1,
-                                                                          comb,only_l,only_r,em)? {
+                                Some(spl1) => {
+                                    // buf_y contains spl1
+                                    let len_spl1 = buf_y.len();
+                                    match V::extract_bytes(&Id::new(),&v1,&buf_x[..],w2,w1-w2,
+                                                           &mut buf_y,em)? {
                                         None => return Ok(None),
-                                        Some((nv,inp)) => {
-                                            nslice.push(MemObj::ValueObj(nv.as_obj()));
-                                            ninp.push(inp);
-                                            cur_x = None;
-                                            cur_y = Some((MemObj::ValueObj(spl2.as_obj()),inp2));
+                                        Some(spl2) => {
+                                            // buf_y contains spl1+spl2
+                                            CompVec::push(&Id::new(),&mut outp,
+                                                          res,MemObj::ValueObj(spl1),
+                                                          &mut buf_y,em)?;
+                                            buf_y.drain(0..len_spl1);
+                                            // buf_x contains spl2
+                                            cur_x = Some(MemObj::ValueObj(spl2));
+                                            swap(&mut buf_x,&mut buf_y);
                                         }
                                     }
                                 }
                             },
-                            Ordering::Greater => match V::extract_bytes(OptRef::Ref(&v1),inp_v1.clone(),0,w2,em)? {
-                                None => return Ok(None),
-                                Some((spl1,inp1)) => match V::extract_bytes(OptRef::Ref(&v1),inp_v1,w2,w1-w2,em)? {
-                                    None => return Ok(None),
-                                    Some((spl2,inp2)) => match V::combine(spl1,OptRef::Owned(v2),
-                                                                          inp1,inp_v2,
-                                                                          comb,only_l,only_r,em)? {
-                                        None => return Ok(None),
-                                        Some((nv,inp)) => {
-                                            nslice.push(MemObj::ValueObj(nv.as_obj()));
-                                            ninp.push(inp);
-                                            cur_x = Some((MemObj::ValueObj(spl2.as_obj()),inp2));
-                                            cur_y = None;
-                                        }
-                                    }
+                            Ordering::Greater => {
+                                for i in 0..buf_x.len() {
+                                    buf_x[i] = only_l(buf_x[i].clone(),em)?;
                                 }
+                                CompVec::push(&Id::new(),&mut outp,
+                                              res,x.clone(),&mut buf_x,em)?;
+                                buf_x.clear();
+                                cur_y = Some(MemObj::FreshObj(w2-w1));
                             }
                         }
                     },
-                    MemObj::ValueObj(v2) => {
-                        let inp_v2 = rcur_y.1;
-                        let (v1,inp_v1) = match V::from_const(dl,c,tp,tps,em)? {
+                    _ => {
+                        let cpos = buf_x.len();
+                        match MemObj::as_value(&Id::new(),
+                                               &y,&buf_y[..],
+                                               &mut buf_x,em)? {
                             None => return Ok(None),
-                            Some(r) => r
-                        };
-                        let w1 = v1.byte_width();
-                        let w2 = v2.byte_width();
-                        match w1.cmp(&w2) {
-                            Ordering::Equal => match V::combine(OptRef::Owned(v1),
-                                                                OptRef::Owned(v2),
-                                                                inp_v1,
-                                                                inp_v2,
-                                                                comb,only_l,only_r,em)? {
-                                None => return Ok(None),
-                                Some((nv,inp)) => {
-                                    nslice.push(MemObj::ValueObj(nv.as_obj()));
-                                    ninp.push(inp);
-                                    cur_x = None;
-                                    cur_y = None;
-                                }
-                            },
-                            Ordering::Less => match V::extract_bytes(OptRef::Ref(&v2),inp_v2.clone(),0,w1,em)? {
-                                None => return Ok(None),
-                                Some((spl1,inp1)) => match V::extract_bytes(OptRef::Ref(&v2),inp_v2,w1,w2-w1,em)? {
-                                    None => return Ok(None),
-                                    Some((spl2,inp2)) => match V::combine(OptRef::Owned(v1),spl1,
-                                                                          inp_v1,inp1,
-                                                                          comb,only_l,only_r,em)? {
+                            Some(v2) => {
+                                // buf_x contains y as value
+                                let w1 = v1.byte_width();
+                                let w2 = v2.byte_width();
+                                buf_y.clear();
+                                match w1.cmp(&w2) {
+                                    Ordering::Equal => match V::combine(
+                                        &Id::new(),v1,&buf_x[..cpos],
+                                        &Id::new(),&v2,&buf_x[cpos..],
+                                        comb,only_l,only_r,&mut buf_y,em)? {
                                         None => return Ok(None),
-                                        Some((nv,inp)) => {
-                                            nslice.push(MemObj::ValueObj(nv.as_obj()));
-                                            ninp.push(inp);
-                                            cur_x = None;
-                                            cur_y = Some((MemObj::ValueObj(spl2.as_obj()),inp2));
+                                        Some(nv) => {
+                                            CompVec::push(&Id::new(),&mut outp,
+                                                          res,
+                                                          MemObj::ValueObj(nv),
+                                                          &mut buf_y,em)?;
+                                            buf_x.clear();
+                                            buf_y.clear();
                                         }
-                                    }
-                                }
-                            },
-                            Ordering::Greater => match V::extract_bytes(OptRef::Ref(&v1),inp_v1.clone(),0,w2,em)? {
-                                None => return Ok(None),
-                                Some((spl1,inp1)) => match V::extract_bytes(OptRef::Ref(&v1),inp_v1,w2,w1-w2,em)? {
-                                    None => return Ok(None),
-                                    Some((spl2,inp2)) => match V::combine(spl1,OptRef::Ref(&v2),
-                                                                          inp1,inp_v2,
-                                                                          comb,only_l,only_r,em)? {
-                                        None => return Ok(None),
-                                        Some((nv,inp)) => {
-                                            nslice.push(MemObj::ValueObj(nv.as_obj()));
-                                            ninp.push(inp);
-                                            cur_x = Some((MemObj::ValueObj(spl2.as_obj()),inp2));
-                                            cur_y = None;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                },
-                MemObj::ValueObj(v1) => {
-                    let w1 = v1.byte_width();
-                    if let MemObj::FreshObj(w2) = rcur_y.0 {
-                        match w1.cmp(&w2) {
-                            Ordering::Equal => {
-                                nslice.push(MemObj::ValueObj(v1.clone()));
-                                ninp.push(rcur_x.1);
-                                cur_x = None;
-                                cur_y = None;
-                            },
-                            Ordering::Less => {
-                                nslice.push(MemObj::ValueObj(v1.clone()));
-                                ninp.push(rcur_x.1);
-                                cur_x = None;
-                                cur_y = Some((MemObj::FreshObj(w2-w1),
-                                              Transformation::id(0)));
-                            },
-                            Ordering::Greater => match V::extract_bytes(OptRef::Ref(&v1),rcur_x.1.clone(),0,w2,em)? {
-                                None => return Ok(None),
-                                Some((spl1,inp1)) => match V::extract_bytes(OptRef::Ref(&v1),rcur_x.1,w2,w1-w2,em)? {
-                                    None => return Ok(None),
-                                    Some((spl2,inp2)) => {
-                                        nslice.push(MemObj::ValueObj(spl1.as_obj()));
-                                        ninp.push(inp1);
-                                        cur_x = Some((MemObj::ValueObj(spl2.as_obj()),inp2));
-                                        cur_y = None;
-                                    }
-                                }
-                            }
-                        }
-                    } else if let Some((v2,inp_v2)) = MemObj::as_value(OptRef::Owned(rcur_y.0),rcur_y.1,em)? {
-                        let w2 = v2.as_ref().byte_width();
-                            match w1.cmp(&w2) {
-                                Ordering::Equal => match V::combine(OptRef::Ref(&v1),
-                                                                    v2,
-                                                                    rcur_x.1,
-                                                                    inp_v2,
-                                                                    comb,only_l,only_r,em)? {
-                                    None => return Ok(None),
-                                    Some((nv,inp)) => {
-                                        nslice.push(MemObj::ValueObj(nv.as_obj()));
-                                        ninp.push(inp);
-                                        cur_x = None;
-                                        cur_y = None;
-                                    }
-                                },
-                                Ordering::Less => match V::extract_bytes(v2.to_ref(),inp_v2.clone(),0,w1,em)? {
-                                    None => return Ok(None),
-                                    Some((spl1,inp1)) => match V::extract_bytes(v2.to_ref(),inp_v2,w1,w2-w1,em)? {
-                                        None => return Ok(None),
-                                        Some((spl2,inp2)) => match V::combine(OptRef::Ref(&v1),spl1,
-                                                                              rcur_x.1,inp1,
-                                                                              comb,only_l,only_r,em)? {
+                                    },
+                                    Ordering::Less => {
+                                        match V::extract_bytes(
+                                            &Id::new(),&v2,&buf_x[cpos..],
+                                            0,w1,&mut buf_y,em)? {
                                             None => return Ok(None),
-                                            Some((nv,inp)) => {
-                                                nslice.push(MemObj::ValueObj(nv.as_obj()));
-                                                ninp.push(inp);
-                                                cur_x = None;
-                                                cur_y = Some((MemObj::ValueObj(spl2.as_obj()),inp2));
+                                            Some(spl1) => {
+                                                let cpos2 = buf_y.len();
+                                                match V::extract_bytes(
+                                                    &Id::new(),&v2,&buf_x[cpos..],
+                                                    w1,w2-w1,&mut buf_y,em)? {
+                                                    None => return Ok(None),
+                                                    Some(spl2) => {
+                                                        let mut tmp = Vec::new();
+                                                        match V::combine(
+                                                            &Id::new(),
+                                                            v1,&buf_x[..cpos],
+                                                            &Id::new(),
+                                                            &spl1,&buf_y[..cpos2],
+                                                            comb,only_l,only_r,
+                                                            &mut tmp,em)? {
+                                                            None => return Ok(None),
+                                                            Some(nv) => {
+                                                                CompVec::push(&Id::new(),
+                                                                              &mut outp,
+                                                                              res,
+                                                                              MemObj::ValueObj(nv),
+                                                                              &mut tmp,em)?;
+                                                                buf_x.clear();
+                                                                buf_y.drain(..cpos2);
+                                                                cur_y = Some(MemObj::ValueObj(spl2));
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
-                                    }
-                                },
-                                Ordering::Greater => match V::extract_bytes(OptRef::Ref(&v1),rcur_x.1.clone(),0,w2,em)? {
-                                    None => return Ok(None),
-                                    Some((spl1,inp1)) => match V::extract_bytes(OptRef::Ref(&v1),rcur_x.1,w2,w1-w2,em)? {
-                                        None => return Ok(None),
-                                        Some((spl2,inp2)) => match V::combine(spl1,v2,
-                                                                              inp1,inp_v2,
-                                                                              comb,only_l,only_r,em)? {
+                                    },
+                                    Ordering::Greater => {
+                                        match V::extract_bytes(
+                                            &Id::new(),v1,&buf_x[..cpos],
+                                            0,w2,&mut buf_y,em)? {
                                             None => return Ok(None),
-                                            Some((nv,inp)) => {
-                                                nslice.push(MemObj::ValueObj(nv.as_obj()));
-                                                ninp.push(inp);
-                                                cur_x = Some((MemObj::ValueObj(spl2.as_obj()),inp2));
-                                                cur_y = None;
+                                            Some(spl1) => {
+                                                let cpos2 = buf_y.len();
+                                                match V::extract_bytes(
+                                                    &Id::new(),v1,&buf_x[..cpos],
+                                                    w2,w1-w2,&mut buf_y,em)? {
+                                                    None => return Ok(None),
+                                                    Some(spl2) => {
+                                                        let mut tmp = Vec::new();
+                                                        match V::combine(
+                                                            &Id::new(),
+                                                            &v2,&buf_x[cpos..],
+                                                            &Id::new(),
+                                                            &spl1,&buf_y[..cpos2],
+                                                            comb,only_l,only_r,
+                                                            &mut tmp,em)? {
+                                                            None => return Ok(None),
+                                                            Some(nv) => {
+                                                                CompVec::push(&Id::new(),
+                                                                              &mut outp,
+                                                                              res,
+                                                                              MemObj::ValueObj(nv),
+                                                                              &mut tmp,em)?;
+                                                                buf_x.clear();
+                                                                buf_y.drain(..cpos2);
+                                                                cur_y = Some(MemObj::ValueObj(spl2));
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
-                    } else {
-                        unreachable!()
+                        }
                     }
                 }
             }
         }
-        Ok(Some((OptRef::Owned(MemSlice(nslice)),Transformation::concat(&ninp[..]))))
+        Ok(Some(MemSlice(outp)))
     }
 }
 
@@ -743,7 +816,7 @@ impl<'a,V : Hash> Hash for MemObj<'a,V> {
     }
 }
 
-impl<'a,V : HasSorts> HasSorts for MemObj<'a,V> {
+/*impl<'a,V : HasSorts> HasSorts for MemObj<'a,V> {
     fn num_elem(&self) -> usize {
         match self {
             &MemObj::ValueObj(ref v) => v.num_elem(),
@@ -776,7 +849,7 @@ impl<'a,V : Composite> Composite for MemObj<'a,V> {
         FR: Fn(Transf<Em>, &mut Em) -> Result<Transf<Em>, Em::Error> {
         Ok(None)
     }
-}
+}*/
 
 impl<'b,V> Semantic for MemObj<'b,V>
     where V : Semantic {
@@ -809,7 +882,7 @@ impl<'b,V> Semantic for MemObj<'b,V>
     }
 }
 
-impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for MemSlice<'b,V> {
+impl<'b,V : Semantic+Bytes<'b>+FromConst<'b>> Semantic for MemSlice<'b,V> {
     type Meaning = VecMeaning<V::Meaning>;
     type MeaningCtx = V::MeaningCtx;
     fn meaning(&self,n: usize) -> Self::Meaning {
@@ -824,5 +897,68 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for MemSlice<'b,V> {
     fn next_meaning(&self,ctx: &mut Self::MeaningCtx,
                     m: &mut Self::Meaning) -> bool {
         self.0.next_meaning(ctx,m)
+    }
+}
+
+impl<'a,V> Clone for MemObjs<'a,V> {
+    fn clone(&self) -> Self {
+        MemObjs(PhantomData)
+    }
+}
+
+impl<'a,V: 'a> SimplePathEl<'a> for MemObjs<'a,V> {
+    type From = MemSlice<'a,V>;
+    type To   = CompVec<MemObj<'a,V>>;
+    fn get<'c>(&self,from: &'c Self::From) -> &'c Self::To where 'a: 'c {
+        &from.0
+    }
+    fn get_mut<'c>(&self,from: &'c mut Self::From) -> &'c mut Self::To where 'a: 'c {
+        &mut from.0
+    }
+}
+
+impl<'a,Em: Embed,V: 'a> PathEl<'a,Em> for MemObjs<'a,V> {
+    fn read<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        prev.read(prev_from,pos,arr,em)
+    }
+    fn read_slice<'c,Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        len: usize,
+        arr: &'c [Em::Expr])
+        -> Option<&'c [Em::Expr]> {
+        prev.read_slice(prev_from,pos,len,arr)
+    }
+    fn write<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write(prev_from,pos,e,arr,em)
+    }
+    fn write_slice<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &mut Prev::From,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write_slice(prev_from,pos,old_len,src,trg,em)
     }
 }

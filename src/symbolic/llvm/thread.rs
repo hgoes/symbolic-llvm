@@ -1,7 +1,11 @@
-extern crate smtrs;
-
-use self::smtrs::composite::*;
-use self::smtrs::embed::{Embed,DeriveConst};
+use smtrs::composite::*;
+use smtrs::composite::map::*;
+use smtrs::composite::stack::*;
+use smtrs::composite::choice::*;
+use smtrs::composite::singleton::*;
+use smtrs::composite::tuple::*;
+use smtrs::composite::vec::*;
+use smtrs::embed::{Embed,DeriveConst};
 use super::mem::{Bytes,FromConst};
 use super::frame::*;
 use super::{InstructionRef};
@@ -11,6 +15,7 @@ use std::ops::Range;
 use std::cmp::Ordering;
 use std::hash::{Hash,Hasher};
 use std::fmt;
+use std::fmt::Debug;
 
 pub type CallId<'a> = (Option<InstructionRef<'a>>,&'a String);
 
@@ -28,180 +33,22 @@ pub struct Thread<'a,V> {
     ret: Option<V>
 }
 
-enum CallStackDataVars<'a,'b : 'a,V : 'b> {
-    CallFrame(CallFrameDataVars<'a,'b,V>),
-    Frame(Range<usize>)
-}
-
-enum ThreadDataVarsPos<'a,'b : 'a,V : 'b> {
-    CallStack { assoc_nr: usize,
-                stack_nr: usize,
-                iter: CallStackDataVars<'a,'b,V> },
-    Stack { assoc_nr: usize,
-            stack_nr: usize,
-            iter: Range<usize> },
-    Ret(Range<usize>)
-}
-
-pub struct ThreadDataVars<'a,'b : 'a,V : 'b> {
-    off: usize,
-    thread: &'a Thread<'b,V>,
-    iter: ThreadDataVarsPos<'a,'b,V>
-}
-
-impl<'a,'b,V : Bytes+FromConst<'b>> Iterator for ThreadDataVars<'a,'b,V> {
-    type Item = usize;
-    fn next(&mut self) -> Option<usize> {
-        'outer: loop {
-            let niter = match self.iter {
-                ThreadDataVarsPos::CallStack { ref mut assoc_nr, ref mut stack_nr, ref mut iter } => {
-                    let niter = match iter {
-                        &mut CallStackDataVars::CallFrame(ref mut siter) => match siter.next() {
-                            Some(r) => return Some(r),
-                            None => {
-                                let &(_,ref frs) = self.thread.call_stack.entry(*assoc_nr);
-                                let &(_,ref fr) = frs.entry(*stack_nr);
-                                let (fr_sz,niter) = fr.data_vars(self.off);
-                                self.off+=fr_sz;
-                                Some(CallStackDataVars::Frame(niter))
-                            }
-                        },
-                        &mut CallStackDataVars::Frame(ref mut siter) => match siter.next() {
-                            Some(r) => return Some(r),
-                            None => None
-                        }
-                    };
-                    match niter {
-                        Some(it) => {
-                            *iter = it;
-                            continue
-                        },
-                        None => {
-                            let &(_,ref st) = self.thread.call_stack.entry(*assoc_nr);
-                            if *stack_nr+1<st.len() {
-                                *stack_nr+=1;
-                                let (sz,nit) = st.entry(*stack_nr).0.data_vars(self.off);
-                                self.off+=sz;
-                                *iter = CallStackDataVars::CallFrame(nit);
-                                continue
-                            }
-                            for p in *assoc_nr+1..self.thread.call_stack.len() {
-                                self.off+=1;
-                                let cfs = &self.thread.call_stack.entry(p).1;
-                                if cfs.len() > 0 {
-                                    *assoc_nr = p;
-                                    *stack_nr = 0;
-                                    let &(ref cf,_) = cfs.entry(0);
-                                    let (sz,nit) = cf.data_vars(self.off);
-                                    self.off+=sz;
-                                    *iter = CallStackDataVars::CallFrame(nit);
-                                    continue 'outer
-                                }
-                            }
-                            {
-                                let mut nxt_fr = None;
-                                for fr_pos in 0..self.thread.stack.len() {
-                                    let entr = &self.thread.stack.entry(fr_pos).1;
-                                    if entr.len() > 0 {
-                                        let (sz,it) = entr.entry(0).data_vars(self.off);
-                                        self.off+=sz;
-                                        nxt_fr = Some((fr_pos,it));
-                                        break
-                                    }
-                                }
-                                match nxt_fr {
-                                    None => return None,
-                                    Some((pos,it)) => ThreadDataVarsPos::Stack { assoc_nr: pos,
-                                                                                 stack_nr: 0,
-                                                                                 iter: it }
-                                }
-                            }
-                        }
-                    }
-                },
-                ThreadDataVarsPos::Stack { ref mut assoc_nr, ref mut stack_nr, ref mut iter } => {
-                    match iter.next() {
-                        Some(r) => return Some(r),
-                        None => {
-                            let &(_,ref st) = self.thread.stack.entry(*assoc_nr);
-                            if *stack_nr+1<st.len() {
-                                *stack_nr+=1;
-                                let (sz,nit) = st.entry(*stack_nr).data_vars(self.off);
-                                self.off+=sz;
-                                *iter = nit;
-                                continue
-                            }
-                            for p in *assoc_nr+1..self.thread.stack.len() {
-                                let cfs = &self.thread.stack.entry(p).1;
-                                if cfs.len() > 0 {
-                                    *assoc_nr = p;
-                                    *stack_nr = 0;
-                                    let (sz,nit) = cfs.entry(0).data_vars(self.off);
-                                    self.off+=sz;
-                                    *iter = nit;
-                                    continue 'outer
-                                }
-                            }
-                            let top_sz = self.thread.stack_top.num_elem();
-                            let ret_sz = self.thread.ret.num_elem();
-                            self.off+=top_sz;
-                            let coff = self.off;
-                            self.off+=ret_sz;
-                            ThreadDataVarsPos::Ret(coff..coff+ret_sz)
-                        }
-                    }
-                },
-                ThreadDataVarsPos::Ret(ref mut it) => match it.next() {
-                    Some(r) => return Some(r),
-                    None => return None
-                }
-            };
-            self.iter = niter;
-        }
+impl<'a,V> Thread<'a,V> {
+    pub fn call_stack() -> CallStackPath<'a,V> {
+        CallStackPath(PhantomData)
+    }
+    pub fn stack() -> StackPath<'a,V> {
+        StackPath(PhantomData)
+    }
+    pub fn stack_top() -> StackTopPath<'a,V> {
+        StackTopPath(PhantomData)
+    }
+    pub fn ret() -> RetPath<'a,V> {
+        RetPath(PhantomData)
     }
 }
 
-impl<'a,V : Bytes+FromConst<'a>> Thread<'a,V> {
-    pub fn data_vars<'b>(&'b self,mut off: usize) -> ThreadDataVars<'b,'a,V> {
-        for cs_idx in 0..self.call_stack.len() {
-            off+=1;
-            let &(_,ref cs) = self.call_stack.entry(cs_idx);
-            if cs.len()>0 {
-                let &(ref cf,_) = cs.entry(0);
-                let (sz,it) = cf.data_vars(off);
-                return ThreadDataVars { off: off+sz,
-                                        thread: self,
-                                        iter: ThreadDataVarsPos::CallStack {
-                                            assoc_nr: cs_idx,
-                                            stack_nr: 0,
-                                            iter: CallStackDataVars::CallFrame(it)
-                                        }
-                }
-            }
-        }
-        for st_idx in 0..self.stack.len() {
-            let st = &self.stack.entry(st_idx).1;
-            if st.len()>0 {
-                let fr = st.entry(0);
-                let (sz,it) = fr.data_vars(off);
-                return ThreadDataVars { off: off+sz,
-                                        thread: self,
-                                        iter: ThreadDataVarsPos::Stack {
-                                            assoc_nr: st_idx,
-                                            stack_nr: 0,
-                                            iter: it
-                                        }
-                }
-            }
-        }
-        let top_sz = self.stack_top.num_elem();
-        let ret_sz = self.ret.num_elem();
-        ThreadDataVars { off: off+top_sz,
-                         thread: self,
-                         iter: ThreadDataVarsPos::Ret(off+top_sz..off+top_sz+ret_sz) }
-    }
-}
-
+/*
 pub fn get_top_call_frame<'a,'b,V,Em>(cfs: OptRef<'a,CallStack<'b,V>>,
                                       cfs_inp: Transf<Em>,
                                       cf_id: &CallId<'b>,
@@ -378,9 +225,9 @@ pub fn decompose_thread<'a,'b,V,Em>(thr: OptRef<'a,Thread<'b,V>>,
     let sz_ret = ret.as_ref().num_elem();
     let inp_ret = Transformation::view(sz_cs+sz_st+sz_top,sz_ret,inp_thr);
     (cs,inp_cs,st,inp_st,top,inp_top,ret,inp_ret)
-}
+}*/
 
-impl<'b,V : HasSorts> HasSorts for Thread<'b,V> {
+impl<'b,V: HasSorts> HasSorts for Thread<'b,V> {
     fn num_elem(&self) -> usize {
         self.call_stack.num_elem() +
             self.stack.num_elem() +
@@ -407,222 +254,420 @@ impl<'b,V : HasSorts> HasSorts for Thread<'b,V> {
     }
 }
 
-impl<'b,V : Bytes+FromConst<'b>> Composite for Thread<'b,V> {
-    fn combine<'a,Em,FComb,FL,FR>(x: OptRef<'a,Self>,y: OptRef<'a,Self>,
-                                  inp_x: Transf<Em>,inp_y: Transf<Em>,
-                                  comb: &FComb,only_l: &FL,only_r: &FR,em: &mut Em)
-                                  -> Result<Option<(OptRef<'a,Self>,Transf<Em>)>,Em::Error>
-        where Em : Embed,
-              FComb : Fn(Transf<Em>,Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
-              FL : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
-              FR : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error> {
-        let (cs_x,inp_cs_x,st_x,inp_st_x,top_x,inp_top_x,ret_x,inp_ret_x) = decompose_thread(x,inp_x);
-        let (cs_y,inp_cs_y,st_y,inp_st_y,top_y,inp_top_y,ret_y,inp_ret_y) = decompose_thread(y,inp_y);
-        let (cs,inp_cs) = match Assoc::combine(cs_x,cs_y,
-                                               inp_cs_x,inp_cs_y,
-                                               comb,only_l,only_r,em)? {
+impl<'a,V: Bytes<'a>+FromConst<'a>+Debug> Composite<'a> for Thread<'a,V> {
+    fn combine<Em,PL,PR,FComb,FL,FR>(
+        pl: &PL,froml: &PL::From,arrl: &[Em::Expr],
+        pr: &PR,fromr: &PR::From,arrr: &[Em::Expr],
+        comb: &FComb,only_l: &FL,only_r: &FR,
+        res: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<Option<Self>,Em::Error>
+        where
+        Em: Embed,
+        PL: Path<'a,Em,To=Self>,
+        PR: Path<'a,Em,To=Self>,
+        FComb: Fn(Em::Expr,Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
+        FL: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
+        FR: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error> {
+
+        let cs_l = pl.clone().then(Self::call_stack());
+        let cs_r = pr.clone().then(Self::call_stack());
+
+        let ncs = match CallStack::combine(&cs_l,froml,arrl,
+                                           &cs_r,fromr,arrr,
+                                           comb,only_l,only_r,
+                                           res,em)? {
             None => return Ok(None),
             Some(r) => r
         };
-        let (st,inp_st) = match Assoc::combine(st_x,st_y,
-                                               inp_st_x,inp_st_y,
-                                               comb,only_l,only_r,em)? {
+
+        let st_l = pl.clone().then(Self::stack());
+        let st_r = pr.clone().then(Self::stack());
+
+        let nst = match Stack::combine(&st_l,froml,arrl,
+                                       &st_r,fromr,arrr,
+                                       comb,only_l,only_r,
+                                       res,em)? {
             None => return Ok(None),
             Some(r) => r
         };
-        let (top,inp_top) = match Choice::combine(top_x,top_y,
-                                                  inp_top_x,inp_top_y,
-                                                  comb,only_l,only_r,em)? {
+
+        let top_l = pl.clone().then(Self::stack_top());
+        let top_r = pr.clone().then(Self::stack_top());
+
+        let ntop = match StackTop::combine(&top_l,froml,arrl,
+                                           &top_r,fromr,arrr,
+                                           comb,only_l,only_r,
+                                           res,em)? {
             None => return Ok(None),
             Some(r) => r
         };
-        let (ret,inp_ret) = match Option::combine(ret_x,ret_y,
-                                                  inp_ret_x,inp_ret_y,
-                                                  comb,only_l,only_r,em)? {
+
+        let ret_l = pl.clone().then(Self::ret());
+        let ret_r = pr.clone().then(Self::ret());
+
+        let nret = match Option::combine(&ret_l,froml,arrl,
+                                         &ret_r,fromr,arrr,
+                                         comb,only_l,only_r,
+                                         res,em)? {
             None => return Ok(None),
             Some(r) => r
         };
-        Ok(Some((OptRef::Owned(Thread { call_stack: cs.as_obj(),
-                                        stack: st.as_obj(),
-                                        stack_top: top.as_obj(),
-                                        ret: ret.as_obj() }),
-                 Transformation::concat(&[inp_cs,inp_st,inp_top,inp_ret]))))
+
+        Ok(Some(Thread { call_stack: ncs,
+                         stack: nst,
+                         stack_top: ntop,
+                         ret: nret }))
     }
 }
 
 #[derive(PartialEq,Eq,Debug)]
-pub struct CallStackView<'a,V : 'a>(PhantomData<&'a V>);
+pub struct CallStackPath<'a,V: 'a>(PhantomData<&'a V>);
 
-impl<'a,V : 'a> Clone for CallStackView<'a,V> {
+impl<'a,V: 'a> Clone for CallStackPath<'a,V> {
     fn clone(&self) -> Self {
-        CallStackView(PhantomData)
+        CallStackPath(PhantomData)
     }
 }
 
 #[derive(PartialEq,Eq,Debug)]
-pub struct StackView<'a,V : 'a>(PhantomData<&'a V>);
+pub struct StackPath<'a,V: 'a>(PhantomData<&'a V>);
 
-impl<'a,V : 'a> Clone for StackView<'a,V> {
+impl<'a,V: 'a> Clone for StackPath<'a,V> {
     fn clone(&self) -> Self {
-        StackView(PhantomData)
+        StackPath(PhantomData)
     }
 }
 
 #[derive(PartialEq,Eq,Debug)]
-pub struct StackTopView<'a,V : 'a>(PhantomData<&'a V>);
+pub struct StackTopPath<'a,V: 'a>(PhantomData<&'a V>);
 
-impl<'a,V : 'a> Clone for StackTopView<'a,V> {
+impl<'a,V: 'a> Clone for StackTopPath<'a,V> {
     fn clone(&self) -> Self {
-        StackTopView(PhantomData)
+        StackTopPath(PhantomData)
     }
 }
 
 #[derive(PartialEq,Eq,Debug)]
-pub struct RetView<'a,V : 'a>(PhantomData<&'a V>);
+pub struct RetPath<'a,V: 'a>(PhantomData<&'a V>);
 
-impl<'a,V : 'a> Clone for RetView<'a,V> {
+impl<'a,V: 'a> Clone for RetPath<'a,V> {
     fn clone(&self) -> Self {
-        RetView(PhantomData)
+        RetPath(PhantomData)
     }
 }
 
-impl<'a,V> CallStackView<'a,V> {
+impl<'a,V> CallStackPath<'a,V> {
     pub fn new() -> Self {
-        CallStackView(PhantomData)
+        CallStackPath(PhantomData)
     }
 }
 
-impl<'a,V> StackView<'a,V> {
+impl<'a,V> StackPath<'a,V> {
     pub fn new() -> Self {
-        StackView(PhantomData)
+        StackPath(PhantomData)
     }
 }
 
-impl<'a,V> StackTopView<'a,V> {
+impl<'a,V> StackTopPath<'a,V> {
     pub fn new() -> Self {
-        StackTopView(PhantomData)
+        StackTopPath(PhantomData)
     }
 }
 
-impl<'a,V> RetView<'a,V> {
+impl<'a,V> RetPath<'a,V> {
     pub fn new() -> Self {
-        RetView(PhantomData)
+        RetPath(PhantomData)
     }
 }
 
-impl<'a,V> View for CallStackView<'a,V>
-    where V : 'a+Bytes+FromConst<'a> {
-    type Viewed = Thread<'a,V>;
-    type Element = CallStack<'a,V>;
-    fn get_el<'b>(&self,obj: &'b Self::Viewed)
-                  -> &'b Self::Element where Self : 'b {
+impl<'a,V> SimplePathEl<'a> for CallStackPath<'a,V>
+    where V : 'a+Bytes<'a>+FromConst<'a> {
+    type From = Thread<'a,V>;
+    type To   = CallStack<'a,V>;
+    fn get<'b>(&self,obj: &'b Self::From)
+               -> &'b Self::To where 'a: 'b {
         &obj.call_stack
     }
-    fn get_el_ext<'b>(&self,obj: &'b Self::Viewed)
-                      -> (usize,&'b Self::Element) where Self : 'b {
-        (0,&obj.call_stack)
+    fn get_mut<'c>(&self,from: &'c mut Self::From)
+                   -> &'c mut Self::To where 'a: 'c {
+        &mut from.call_stack
     }
 }
 
-impl<'a,V> View for StackView<'a,V>
-    where V : 'a+Bytes+FromConst<'a> {
-    type Viewed = Thread<'a,V>;
-    type Element = Stack<'a,V>;
-    fn get_el<'b>(&self,obj: &'b Self::Viewed)
-                  -> &'b Self::Element where Self : 'b {
-        &obj.stack
+impl<'a,Em: Embed,V> PathEl<'a,Em> for CallStackPath<'a,V>
+    where V : 'a+Bytes<'a>+FromConst<'a> {
+    fn read<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        prev.read(prev_from,pos,arr,em)
     }
-    fn get_el_ext<'b>(&self,obj: &'b Self::Viewed)
-                      -> (usize,&'b Self::Element) where Self : 'b {
-        (obj.call_stack.num_elem(),&obj.stack)
+    fn read_slice<'c,Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        len: usize,
+        arr: &'c [Em::Expr])
+        -> Option<&'c [Em::Expr]> {
+        prev.read_slice(prev_from,pos,len,arr)
     }
-}
-
-impl<'a,V> View for StackTopView<'a,V>
-    where V : Bytes+FromConst<'a> {
-    type Viewed = Thread<'a,V>;
-    type Element = StackTop<'a>;
-    fn get_el<'b>(&self,obj: &'b Self::Viewed)
-                  -> &'b Self::Element where Self : 'b {
-        &obj.stack_top
+    fn write<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write(prev_from,pos,e,arr,em)
     }
-    fn get_el_ext<'b>(&self,obj: &'b Self::Viewed)
-                      -> (usize,&'b Self::Element) where Self : 'b {
-        (obj.call_stack.num_elem()+
-         obj.stack.num_elem(),&obj.stack_top)
-    }
-}
-
-impl<'a,V> View for RetView<'a,V>
-    where V : 'a+Bytes+FromConst<'a> {
-    type Viewed = Thread<'a,V>;
-    type Element = Option<V>;
-    fn get_el<'b>(&self,obj: &'b Self::Viewed)
-                  -> &'b Self::Element where Self : 'b {
-        &obj.ret
-    }
-    fn get_el_ext<'b>(&self,obj: &'b Self::Viewed)
-                      -> (usize,&'b Self::Element) where Self : 'b {
-        (obj.call_stack.num_elem()+
-         obj.stack.num_elem()+
-         obj.stack_top.num_elem(),&obj.ret)
-    }
-}
-
-impl<'a,V> ViewMut for CallStackView<'a,V>
-    where V : 'a+Bytes+FromConst<'a> {
-    fn get_el_mut<'b>(&self,obj: &'b mut Self::Viewed)
-                      -> &'b mut Self::Element where Self : 'b {
-        &mut obj.call_stack
-    }
-    fn get_el_mut_ext<'b>(&self,obj: &'b mut Self::Viewed)
-                          -> (usize,&'b mut Self::Element)
-        where Self : 'b {
-        (0,&mut obj.call_stack)
+    fn write_slice<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &mut Prev::From,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write_slice(prev_from,pos,old_len,src,trg,em)
     }
 }
 
-impl<'a,V> ViewMut for StackView<'a,V>
-    where V : 'a+Bytes+FromConst<'a> {
-    fn get_el_mut<'b>(&self,obj: &'b mut Self::Viewed)
-                      -> &'b mut Self::Element where Self : 'b {
-        &mut obj.stack
+impl<'a,V> SimplePathEl<'a> for StackPath<'a,V>
+    where V : 'a+Bytes<'a>+FromConst<'a> {
+    type From = Thread<'a,V>;
+    type To   = Stack<'a,V>;
+        fn get<'c>(&self,from: &'c Self::From) -> &'c Self::To where 'a: 'c {
+        &from.stack
     }
-    fn get_el_mut_ext<'b>(&self,obj: &'b mut Self::Viewed)
-                          -> (usize,&'b mut Self::Element)
-        where Self : 'b {
-        (obj.call_stack.num_elem(),&mut obj.stack)
-    }
-}
-
-impl<'a,V> ViewMut for StackTopView<'a,V>
-    where V : 'a+Bytes+FromConst<'a> {
-    fn get_el_mut<'b>(&self,obj: &'b mut Self::Viewed)
-                      -> &'b mut Self::Element where Self : 'b {
-        &mut obj.stack_top
-    }
-    fn get_el_mut_ext<'b>(&self,obj: &'b mut Self::Viewed)
-                          -> (usize,&'b mut Self::Element)
-        where Self : 'b {
-        (obj.call_stack.num_elem()+
-         obj.stack.num_elem(),&mut obj.stack_top)
+    fn get_mut<'c>(&self,from: &'c mut Self::From) -> &'c mut Self::To where 'a: 'c {
+        &mut from.stack
     }
 }
 
-impl<'a,V> ViewMut for RetView<'a,V>
-    where V : 'a+Bytes+FromConst<'a> {
-    fn get_el_mut<'b>(&self,obj: &'b mut Self::Viewed)
-                      -> &'b mut Self::Element where Self : 'b {
-        &mut obj.ret
+impl<'a,Em: Embed,V> PathEl<'a,Em> for StackPath<'a,V>
+    where V : 'a+Bytes<'a>+FromConst<'a> {
+    fn read<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        let off = prev.get(prev_from).call_stack.num_elem();
+        prev.read(prev_from,pos+off,arr,em)
     }
-    fn get_el_mut_ext<'b>(&self,obj: &'b mut Self::Viewed)
-                          -> (usize,&'b mut Self::Element)
-        where Self : 'b {
-        (obj.call_stack.num_elem()+
-         obj.stack.num_elem()+
-         obj.stack_top.num_elem(),&mut obj.ret)
+    fn read_slice<'c,Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        len: usize,
+        arr: &'c [Em::Expr])
+        -> Option<&'c [Em::Expr]> {
+        let off = prev.get(prev_from).call_stack.num_elem();
+        prev.read_slice(prev_from,pos+off,len,arr)
+    }
+    fn write<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = prev.get(prev_from).call_stack.num_elem();
+        prev.write(prev_from,pos+off,e,arr,em)
+    }
+    fn write_slice<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &mut Prev::From,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = prev.get(prev_from).call_stack.num_elem();
+        prev.write_slice(prev_from,pos+off,old_len,src,trg,em)
     }
 }
+
+impl<'a,V> SimplePathEl<'a> for StackTopPath<'a,V>
+    where V : Bytes<'a>+FromConst<'a> {
+    type From = Thread<'a,V>;
+    type To   = StackTop<'a>;
+    fn get<'c>(&self,from: &'c Self::From) -> &'c Self::To where 'a: 'c {
+        &from.stack_top
+    }
+    fn get_mut<'c>(&self,from: &'c mut Self::From) -> &'c mut Self::To where 'a: 'c {
+        &mut from.stack_top
+    }
+}
+
+impl<'a,Em: Embed,V> PathEl<'a,Em> for StackTopPath<'a,V>
+    where V : Bytes<'a>+FromConst<'a> {
+    fn read<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        let off = {
+            let from = prev.get(prev_from);
+            from.call_stack.num_elem()
+                + from.stack.num_elem()
+        };
+        prev.read(prev_from,pos+off,arr,em)
+    }
+    fn read_slice<'c,Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        len: usize,
+        arr: &'c [Em::Expr])
+        -> Option<&'c [Em::Expr]> {
+        let off = {
+            let from = prev.get(prev_from);
+            from.call_stack.num_elem()
+                + from.stack.num_elem()
+        };
+        prev.read_slice(prev_from,pos+off,len,arr)
+    }
+    fn write<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = {
+            let from = prev.get(prev_from);
+            from.call_stack.num_elem()
+                + from.stack.num_elem()
+        };
+        prev.write(prev_from,pos+off,e,arr,em)
+    }
+    fn write_slice<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &mut Prev::From,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = {
+            let from = prev.get(prev_from);
+            from.call_stack.num_elem()
+                + from.stack.num_elem()
+        };
+        prev.write_slice(prev_from,pos+off,old_len,src,trg,em)
+    }
+}
+
+impl<'a,V> SimplePathEl<'a> for RetPath<'a,V>
+    where V: 'a+Bytes<'a>+FromConst<'a> {
+    type From = Thread<'a,V>;
+    type To   = Option<V>;
+    fn get<'c>(&self,from: &'c Self::From) -> &'c Self::To where 'a: 'c {
+        &from.ret
+    }
+    fn get_mut<'c>(&self,from: &'c mut Self::From) -> &'c mut Self::To where 'a: 'c {
+        &mut from.ret
+    }
+}
+
+impl<'a,Em: Embed,V> PathEl<'a,Em> for RetPath<'a,V>
+    where V: 'a+Bytes<'a>+FromConst<'a> {
+    fn read<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        let off = {
+            let from = prev.get(prev_from);
+            from.call_stack.num_elem()
+                + from.stack.num_elem()
+                + from.stack_top.num_elem()
+        };
+        prev.read(prev_from,pos+off,arr,em)
+    }
+    fn read_slice<'c,Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        len: usize,
+        arr: &'c [Em::Expr])
+        -> Option<&'c [Em::Expr]> {
+        let off = {
+            let from = prev.get(prev_from);
+            from.call_stack.num_elem()
+                + from.stack.num_elem()
+                + from.stack_top.num_elem()
+        };
+        prev.read_slice(prev_from,pos+off,len,arr)
+    }
+    fn write<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = {
+            let from = prev.get(prev_from);
+            from.call_stack.num_elem()
+                + from.stack.num_elem()
+                + from.stack_top.num_elem()
+        };
+        prev.write(prev_from,pos+off,e,arr,em)
+    }
+    fn write_slice<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &mut Prev::From,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = {
+            let from = prev.get(prev_from);
+            from.call_stack.num_elem()
+                + from.stack.num_elem()
+                + from.stack_top.num_elem()
+        };
+        prev.write_slice(prev_from,pos+off,old_len,src,trg,em)
+    }
+}
+
+/*
 
 pub type CallFrameView<'a,V>
     = Then<CallStackView<'a,V>,
@@ -630,20 +675,27 @@ pub type CallFrameView<'a,V>
                           BitVecVectorStack<(CallFrame<'a,V>,Frame<'a,V>)>>,
                 Then<BitVecVectorStackView<(CallFrame<'a,V>,Frame<'a,V>)>,
                      FstView<CallFrame<'a,V>,Frame<'a,V>>>>>;
-
-#[derive(Clone,PartialEq,Eq)]
-pub enum FrameView<'a,V : 'a> {
-    Call(Then<CallStackView<'a,V>,
-              Then<AssocView<CallId<'a>,
-                             BitVecVectorStack<(CallFrame<'a,V>,Frame<'a,V>)>>,
-                   Then<BitVecVectorStackView<(CallFrame<'a,V>,Frame<'a,V>)>,
-                        SndView<CallFrame<'a,V>,Frame<'a,V>>>>>),
-    Stack(Then<StackView<'a,V>,
-               Then<AssocView<InstructionRef<'a>,
-                              BitVecVectorStack<Frame<'a,V>>>,
-                    BitVecVectorStackView<Frame<'a,V>>>>)
+*/
+#[derive(Clone)]
+pub enum FramePath<'a,Prev,V: 'a> {
+    Call(Then<Then<Then<Then<Then<Prev,CallStackPath<'a,V>>,
+                             AssocP<CallId<'a>,
+                                    BitVecVectorStack<(CallFrame<'a,V>,
+                                                       Frame<'a,V>)>>>,
+                        BitVecVectorStackElements<(CallFrame<'a,V>,
+                                                   Frame<'a,V>)>>,
+                   CompVecP<(CallFrame<'a,V>,
+                             Frame<'a,V>)>>,
+              Element2Of2<CallFrame<'a,V>,
+                          Frame<'a,V>>>),
+    Stack(Then<Then<Then<Then<Prev,
+                              StackPath<'a,V>>,
+                         AssocP<InstructionRef<'a>,
+                                BitVecVectorStack<Frame<'a,V>>>>,
+                    BitVecVectorStackElements<Frame<'a,V>>>,
+               CompVecP<Frame<'a,V>>>)
 }
-
+/*
 pub fn frame_view_to_idx<'a,V,Em : Embed>(view: &FrameView<'a,V>,bw: usize,em: &mut Em)
                                           -> Result<(FrameId<'a>,Transf<Em>),Em::Error> {
     match view {
@@ -658,74 +710,88 @@ pub fn frame_view_to_idx<'a,V,Em : Embed>(view: &FrameView<'a,V>,bw: usize,em: &
             Ok((FrameId::Stack(iid.key.clone()),inp))
         }
     }
-}
+}*/
 
-impl<'a,V> View for FrameView<'a,V>
-    where V : 'a+Bytes+FromConst<'a> {
+impl<'a,Prev: SimplePath<'a,To=Thread<'a,V>>,V
+     > SimplePath<'a> for FramePath<'a,Prev,V>
+    where V: 'a+Bytes<'a>+FromConst<'a> {
 
-    type Viewed = Thread<'a,V>;
-    type Element = Frame<'a,V>;
+    type From = Prev::From;
+    type To   = Frame<'a,V>;
 
-    fn get_el<'b>(&self,obj: &'b Self::Viewed)
-                  -> &'b Self::Element where Self : 'b {
+    fn get<'b>(&self,from: &'b Self::From)
+               -> &'b Self::To where 'a: 'b {
         match self {
-            &FrameView::Call(ref view)
-                => view.get_el(obj),
-            &FrameView::Stack(ref view)
-                => view.get_el(obj)
+            &FramePath::Call(ref p) => p.get(from),
+            &FramePath::Stack(ref p) => p.get(from)
         }
     }
-    fn get_el_ext<'b>(&self,obj: &'b Self::Viewed)
-                      -> (usize,&'b Self::Element) where Self : 'b {
+    fn get_mut<'b>(&self,from: &'b mut Self::From) -> &'b mut Self::To where 'a: 'b {
         match self {
-            &FrameView::Call(ref view)
-                => view.get_el_ext(obj),
-            &FrameView::Stack(ref view)
-                => view.get_el_ext(obj)
+            &FramePath::Call(ref p) => p.get_mut(from),
+            &FramePath::Stack(ref p) => p.get_mut(from)
         }
     }
 }
 
-impl<'a,V> ViewMut for FrameView<'a,V>
-    where V : 'a+Bytes+FromConst<'a> {
+impl<'a,Em: Embed,Prev: Path<'a,Em,To=Thread<'a,V>>,V
+     > Path<'a,Em> for FramePath<'a,Prev,V>
+    where V: 'a+Bytes<'a>+FromConst<'a> {
 
-    fn get_el_mut<'b>(&self,obj: &'b mut Self::Viewed)
-                      -> &'b mut Self::Element where Self : 'b {
+    fn read(&self,from: &Self::From,pos: usize,arr: &[Em::Expr],em: &mut Em)
+            -> Result<Em::Expr,Em::Error> {
         match self {
-            &FrameView::Call(ref view)
-                => view.get_el_mut(obj),
-            &FrameView::Stack(ref view)
-                => view.get_el_mut(obj)
+            &FramePath::Call(ref p) => p.read(from,pos,arr,em),
+            &FramePath::Stack(ref p) => p.read(from,pos,arr,em)
         }
     }
-    fn get_el_mut_ext<'b>(&self,obj: &'b mut Self::Viewed)
-                          -> (usize,&'b mut Self::Element)
-        where Self : 'b {
+    fn read_slice<'b>(&self,from: &Self::From,pos: usize,len: usize,arr: &'b [Em::Expr])
+                     -> Option<&'b [Em::Expr]> {
         match self {
-            &FrameView::Call(ref view)
-                => view.get_el_mut_ext(obj),
-            &FrameView::Stack(ref view)
-                => view.get_el_mut_ext(obj)
+            &FramePath::Call(ref p) => p.read_slice(from,pos,len,arr),
+            &FramePath::Stack(ref p) => p.read_slice(from,pos,len,arr)
+        }
+    }
+    fn write(&self,from: &Self::From,
+             pos: usize,expr: Em::Expr,
+             arr: &mut Vec<Em::Expr>,em: &mut Em)
+             -> Result<(),Em::Error> {
+        match self {
+            &FramePath::Call(ref p) => p.write(from,pos,expr,arr,em),
+            &FramePath::Stack(ref p) => p.write(from,pos,expr,arr,em)
+        }
+    }
+    fn write_slice(&self,
+                   from: &mut Self::From,
+                   pos: usize,
+                   old_len: usize,
+                   src: &mut Vec<Em::Expr>,
+                   trg: &mut Vec<Em::Expr>,
+                   em: &mut Em)
+                   -> Result<(),Em::Error> {
+        match self {
+            &FramePath::Call(ref p) => p.write_slice(from,pos,old_len,src,trg,em),
+            &FramePath::Stack(ref p) => p.write_slice(from,pos,old_len,src,trg,em)
         }
     }
 }
 
 #[derive(Clone)]
-pub enum ThreadMeaning<'b,V : Semantic+Bytes+FromConst<'b>> {
+pub enum ThreadMeaning<'b,V: Semantic+Bytes<'b>+FromConst<'b>> {
     CallStack(<CallStack<'b,V> as Semantic>::Meaning),
     Stack(<Stack<'b,V> as Semantic>::Meaning),
     StackTop(<StackTop<'b> as Semantic>::Meaning),
     Ret(<Option<V> as Semantic>::Meaning)
 }
 
-pub enum ThreadMeaningCtx<'b,V : Semantic+Bytes+FromConst<'b>> {
+pub enum ThreadMeaningCtx<'b,V: Semantic+Bytes<'b>+FromConst<'b>> {
     CallStack(<CallStack<'b,V> as Semantic>::MeaningCtx),
     Stack(<Stack<'b,V> as Semantic>::MeaningCtx),
     StackTop(<StackTop<'b> as Semantic>::MeaningCtx),
     Ret(<Option<V> as Semantic>::MeaningCtx)
 }
 
-impl<'b,V : Semantic+Bytes+FromConst<'b>> PartialEq for ThreadMeaning<'b,V> {
+impl<'b,V : Semantic+Bytes<'b>+FromConst<'b>> PartialEq for ThreadMeaning<'b,V> {
     fn eq(&self,other: &ThreadMeaning<'b,V>) -> bool {
         match self {
             &ThreadMeaning::CallStack(ref p) => match other {
@@ -748,15 +814,15 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> PartialEq for ThreadMeaning<'b,V> {
     }
 }
 
-impl<'b,V : Semantic+Bytes+FromConst<'b>> Eq for ThreadMeaning<'b,V> {}
+impl<'b,V: Semantic+Bytes<'b>+FromConst<'b>> Eq for ThreadMeaning<'b,V> {}
 
-impl<'b,V : Semantic+Bytes+FromConst<'b>> PartialOrd for ThreadMeaning<'b,V> {
+impl<'b,V: Semantic+Bytes<'b>+FromConst<'b>> PartialOrd for ThreadMeaning<'b,V> {
     fn partial_cmp(&self,other: &ThreadMeaning<'b,V>) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<'b,V : Semantic+Bytes+FromConst<'b>> Ord for ThreadMeaning<'b,V> {
+impl<'b,V: Semantic+Bytes<'b>+FromConst<'b>> Ord for ThreadMeaning<'b,V> {
     fn cmp(&self,other: &ThreadMeaning<'b,V>) -> Ordering {
         match (self,other) {
             (&ThreadMeaning::CallStack(ref p),
@@ -777,7 +843,7 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> Ord for ThreadMeaning<'b,V> {
     }
 }
 
-impl<'b,V : Semantic+Bytes+FromConst<'b>> Hash for ThreadMeaning<'b,V> {
+impl<'b,V: Semantic+Bytes<'b>+FromConst<'b>> Hash for ThreadMeaning<'b,V> {
     fn hash<H>(&self, state: &mut H) where H: Hasher {
         match self {
             &ThreadMeaning::CallStack(ref p) => {
@@ -800,7 +866,7 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> Hash for ThreadMeaning<'b,V> {
     }
 }
 
-impl<'b,V : Semantic+Bytes+FromConst<'b>> fmt::Debug for ThreadMeaning<'b,V> {
+impl<'b,V: Semantic+Bytes<'b>+FromConst<'b>> fmt::Debug for ThreadMeaning<'b,V> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         match self {
             &ThreadMeaning::CallStack(ref p) => f.debug_tuple("CallStack")
@@ -815,19 +881,23 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> fmt::Debug for ThreadMeaning<'b,V> {
     }
 }
 
-impl<'b,V : Semantic+Bytes+FromConst<'b>> ThreadMeaning<'b,V> {
+impl<'b,V: Semantic+Bytes<'b>+FromConst<'b>> ThreadMeaning<'b,V> {
     pub fn is_pc(&self) -> bool {
         match self {
             &ThreadMeaning::CallStack(ref m) => match m.meaning {
                 BitVecVectorStackMeaning::Top => true,
-                BitVecVectorStackMeaning::Elem(_,ref m) => match m {
+                BitVecVectorStackMeaning::Elem(VecMeaning {
+                    ref meaning,..
+                }) => match meaning {
                     &TupleMeaning::Fst(ref m) => m.is_pc(),
                     &TupleMeaning::Snd(ref m) => m.is_pc()
                 }
             },
             &ThreadMeaning::Stack(ref m) => match m.meaning {
                 BitVecVectorStackMeaning::Top => true,
-                BitVecVectorStackMeaning::Elem(_,ref m) => m.is_pc()
+                BitVecVectorStackMeaning::Elem(VecMeaning {
+                    ref meaning,..
+                }) => meaning.is_pc()
             },
             &ThreadMeaning::StackTop(_) => true,
             &ThreadMeaning::Ret(_) => false
@@ -835,7 +905,7 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> ThreadMeaning<'b,V> {
     }
 }
 
-impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for Thread<'b,V> {
+impl<'b,V : Semantic+Bytes<'b>+FromConst<'b>> Semantic for Thread<'b,V> {
     type Meaning = ThreadMeaning<'b,V>;
     type MeaningCtx = ThreadMeaningCtx<'b,V>;
     fn meaning(&self,pos: usize) -> Self::Meaning {
@@ -943,5 +1013,5 @@ impl<'b,V : Semantic+Bytes+FromConst<'b>> Semantic for Thread<'b,V> {
         *m = nm;
         true
     }
-
 }
+

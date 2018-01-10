@@ -1,14 +1,15 @@
-extern crate smtrs;
-extern crate llvm_ir;
-
-use self::smtrs::composite::*;
-use self::smtrs::embed::{Embed,DeriveConst,DeriveValues};
+use smtrs::composite::*;
+use smtrs::composite::map::*;
+use smtrs::composite::singleton::*;
+use smtrs::composite::choice::*;
+use smtrs::composite::vec::*;
+use smtrs::embed::{Embed,DeriveConst,DeriveValues};
 use super::mem::{Bytes,FromConst,MemSlice};
 use super::{InstructionRef};
 use super::thread::*;
 use super::frame::*;
-use super::pointer::{Pointer,PointerTrg,Offset};
-use super::error::{Error,Errors,add_error};
+//use super::pointer::{Pointer,PointerTrg,Offset};
+//use super::error::{Error,Errors,add_error};
 use std::marker::PhantomData;
 use num_bigint::{BigInt,BigUint};
 use std::ops::Range;
@@ -23,11 +24,11 @@ pub const STEP_BW: usize = 32;
 pub type ThreadId<'a> = (Option<InstructionRef<'a>>,&'a String);
 
 pub type Threads<'a,V> = Assoc<ThreadId<'a>,
-                               Vec<Thread<'a,V>>>;
+                               CompVec<Thread<'a,V>>>;
 
 pub type Globals<'a,V> = Assoc<&'a String,MemSlice<'a,V>>;
 
-pub type Heap<'a,V> = Assoc<InstructionRef<'a>,Vec<MemSlice<'a,V>>>;
+pub type Heap<'a,V> = Assoc<InstructionRef<'a>,CompVec<MemSlice<'a,V>>>;
 
 pub type Aux = Choice<Data<Vec<Vec<u8>>>>;
 
@@ -50,107 +51,503 @@ pub struct ProgramInput<'a,V> {
     nondet: Nondet<'a,V>
 }
 
-enum ProgramDataVarsPos<'a,'b : 'a,V : 'b> {
-    Threads { assoc_nr: usize,
-              pool_nr: usize,
-              iter: ThreadDataVars<'a,'b,V> },
-    Globals(Range<usize>),
-    Heap(Range<usize>)
-}
+#[derive(PartialEq,Eq,Debug)]
+pub struct ThreadsPath<'a,V: 'a>(PhantomData<&'a V>);
 
-pub struct ProgramDataVars<'a,'b : 'a,V : 'b> {
-    off: usize,
-    program: &'a Program<'b,V>,
-    iter: ProgramDataVarsPos<'a,'b,V>
-}
-
-impl<'a,'b,V : Bytes+FromConst<'b>> Iterator for ProgramDataVars<'a,'b,V> {
-    type Item = usize;
-    fn next(&mut self) -> Option<usize> {
-        'outer: loop {
-            let niter = match self.iter {
-                ProgramDataVarsPos::Threads { ref mut assoc_nr, ref mut pool_nr, ref mut iter } => match iter.next() {
-                    Some(r) => return Some(r),
-                    None => {
-                        let &(_,ref pool) = self.program.threads.entry(*assoc_nr);
-                        if *pool_nr+1<pool.len() {
-                            *pool_nr+=1;
-                            let thr = &pool[*pool_nr];
-                            *iter = thr.data_vars(self.off);
-                            self.off+=thr.num_elem();
-                            continue
-                        } else {
-                            for i in *assoc_nr+1..self.program.threads.len() {
-                                let &(_,ref pool) = self.program.threads.entry(i);
-                                if pool.len() > 0 {
-                                    let thr = &pool[0];
-                                    let it = thr.data_vars(self.off);
-                                    *assoc_nr = i;
-                                    *pool_nr = 0;
-                                    *iter = it;
-                                    self.off+=thr.num_elem();
-                                    continue 'outer
-                                }
-                            }
-                            let coff = self.off;
-                            let sz = self.program.global.num_elem();
-                            self.off+=sz;
-                            ProgramDataVarsPos::Globals(coff..self.off)
-                        }
-                    }
-                },
-                ProgramDataVarsPos::Globals(ref mut it) => match it.next() {
-                    Some(r) => return Some(r),
-                    None => {
-                        let coff = self.off;
-                        let sz = self.program.heap.num_elem();
-                        self.off+=sz;
-                        ProgramDataVarsPos::Heap(coff..self.off)
-                    }
-                },
-                ProgramDataVarsPos::Heap(ref mut it) => match it.next() {
-                    Some(r) => return Some(r),
-                    None => return None
-                }
-            };
-            self.iter = niter;
-        }
+impl<'a,V: 'a> Clone for ThreadsPath<'a,V> {
+    fn clone(&self) -> Self {
+        ThreadsPath(PhantomData)
     }
 }
 
-impl<'a,V : Bytes+FromConst<'a>> Program<'a,V> {
-    pub fn new() -> Self {
-        Program { threads: Assoc::new(),
-                  global: Assoc::new(),
-                  heap: Assoc::new(),
-                  aux: Choice::new() }
+#[derive(PartialEq,Eq,Debug)]
+pub struct GlobalsPath<'a,V: 'a>(PhantomData<&'a V>);
+
+impl<'a,V: 'a> Clone for GlobalsPath<'a,V> {
+    fn clone(&self) -> Self {
+        GlobalsPath(PhantomData)
+    }
+}
+
+#[derive(PartialEq,Eq,Debug)]
+pub struct HeapPath<'a,V: 'a>(PhantomData<&'a V>);
+
+impl<'a,V: 'a> Clone for HeapPath<'a,V> {
+    fn clone(&self) -> Self {
+        HeapPath(PhantomData)
+    }
+}
+
+#[derive(PartialEq,Eq,Debug)]
+pub struct AuxPath<'a,V: 'a>(PhantomData<&'a V>);
+
+impl<'a,V: 'a> Clone for AuxPath<'a,V> {
+    fn clone(&self) -> Self {
+        AuxPath(PhantomData)
+    }
+}
+
+#[derive(PartialEq,Eq,Debug)]
+pub struct StepPath<'a,V: 'a>(PhantomData<&'a V>);
+
+impl<'a,V: 'a> Clone for StepPath<'a,V> {
+    fn clone(&self) -> Self {
+        StepPath(PhantomData)
+    }
+}
+
+#[derive(PartialEq,Eq,Debug)]
+pub struct NondetPath<'a,V: 'a>(PhantomData<&'a V>);
+
+impl<'a,V: 'a> Clone for NondetPath<'a,V> {
+    fn clone(&self) -> Self {
+        NondetPath(PhantomData)
+    }
+}
+
+impl<'a,V: Bytes<'a>+FromConst<'a>> Program<'a,V> {
+    pub fn new<Em: Embed>(inp: &mut Vec<Em::Expr>,em: &mut Em) -> Result<Self,Em::Error> {
+        Ok(Program { threads: Assoc::empty(inp,em)?,
+                     global: Assoc::empty(inp,em)?,
+                     heap: Assoc::empty(inp,em)?,
+                     aux: Choice::empty(inp,em)? })
     }
     pub fn is_single_threaded(&self) -> bool {
         match self.threads.is_single() {
             None => false,
-            Some(&(_,ref thrs)) => thrs.len()==1
+            Some(&(_,_,ref thrs)) => thrs.len()==1
         }
     }
-    pub fn data_vars<'b>(&'b self) -> ProgramDataVars<'b,'a,V> {
-        for pool_idx in 0..self.threads.len() {
-            let &(_,ref pool) = self.threads.entry(pool_idx);
-            if pool.len() > 0 {
-                let thr = &pool[0];
-                let off = thr.num_elem();
-                return ProgramDataVars { off: off,
-                                         program: self,
-                                         iter: ProgramDataVarsPos::Threads { assoc_nr: pool_idx,
-                                                                             pool_nr: 0,
-                                                                             iter: thr.data_vars(0) } }
-            }
-        }
-        let sz = self.global.num_elem();
-        ProgramDataVars { off: sz,
-                          program: self,
-                          iter: ProgramDataVarsPos::Globals(0..sz) }
+    pub fn threads() -> ThreadsPath<'a,V> {
+        ThreadsPath(PhantomData)
+    }
+    pub fn globals() -> GlobalsPath<'a,V> {
+        GlobalsPath(PhantomData)
+    }
+    pub fn heap() -> HeapPath<'a,V> {
+        HeapPath(PhantomData)
+    }
+    pub fn aux() -> AuxPath<'a,V> {
+        AuxPath(PhantomData)
     }
 }
 
+impl<'a,V> ProgramInput<'a,V> {
+    pub fn step() -> StepPath<'a,V> {
+        StepPath(PhantomData)
+    }
+    pub fn nondet() -> NondetPath<'a,V> {
+        NondetPath(PhantomData)
+    }
+}
+
+impl<'a,V> SimplePathEl<'a> for ThreadsPath<'a,V> {
+    type From = Program<'a,V>;
+    type To   = Threads<'a,V>;
+    fn get<'b>(&self,obj: &'b Self::From)
+               -> &'b Self::To where 'a: 'b {
+        &obj.threads
+    }
+    fn get_mut<'c>(&self,from: &'c mut Self::From)
+                   -> &'c mut Self::To where 'a: 'c {
+        &mut from.threads
+    }
+}
+
+impl<'a,V,Em: Embed> PathEl<'a,Em> for ThreadsPath<'a,V> {
+    fn read<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        prev.read(prev_from,pos,arr,em)
+    }
+    fn read_slice<'c,Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        len: usize,
+        arr: &'c [Em::Expr])
+        -> Option<&'c [Em::Expr]> {
+        prev.read_slice(prev_from,pos,len,arr)
+    }
+    fn write<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write(prev_from,pos,e,arr,em)
+    }
+    fn write_slice<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &mut Prev::From,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write_slice(prev_from,pos,old_len,src,trg,em)
+    }
+}
+
+impl<'a,V: HasSorts> SimplePathEl<'a> for GlobalsPath<'a,V> {
+    type From = Program<'a,V>;
+    type To   = Globals<'a,V>;
+    fn get<'b>(&self,obj: &'b Self::From)
+               -> &'b Self::To where 'a: 'b {
+        &obj.global
+    }
+    fn get_mut<'c>(&self,from: &'c mut Self::From)
+                   -> &'c mut Self::To where 'a: 'c {
+        &mut from.global
+    }
+}
+
+impl<'a,V: HasSorts,Em: Embed> PathEl<'a,Em> for GlobalsPath<'a,V> {
+    fn read<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        let off = prev.get(prev_from).threads.num_elem();
+        prev.read(prev_from,pos+off,arr,em)
+    }
+    fn read_slice<'c,Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        len: usize,
+        arr: &'c [Em::Expr])
+        -> Option<&'c [Em::Expr]> {
+        let off = prev.get(prev_from).threads.num_elem();
+        prev.read_slice(prev_from,pos+off,len,arr)
+    }
+    fn write<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = prev.get(prev_from).threads.num_elem();
+        prev.write(prev_from,pos+off,e,arr,em)
+    }
+    fn write_slice<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &mut Prev::From,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = prev.get(prev_from).threads.num_elem();
+        prev.write_slice(prev_from,pos+off,old_len,src,trg,em)
+    }
+}
+
+impl<'a,V: HasSorts> SimplePathEl<'a> for HeapPath<'a,V> {
+    type From = Program<'a,V>;
+    type To   = Heap<'a,V>;
+    fn get<'b>(&self,obj: &'b Self::From)
+               -> &'b Self::To where 'a: 'b {
+        &obj.heap
+    }
+    fn get_mut<'c>(&self,from: &'c mut Self::From)
+                   -> &'c mut Self::To where 'a: 'c {
+        &mut from.heap
+    }
+}
+
+impl<'a,V: HasSorts,Em: Embed> PathEl<'a,Em> for HeapPath<'a,V> {
+    fn read<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        let off = {
+            let prog = prev.get(prev_from);
+            prog.threads.num_elem() +
+                prog.global.num_elem()
+        };
+        prev.read(prev_from,pos+off,arr,em)
+    }
+    fn read_slice<'c,Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        len: usize,
+        arr: &'c [Em::Expr])
+        -> Option<&'c [Em::Expr]> {
+        let off = {
+            let prog = prev.get(prev_from);
+            prog.threads.num_elem() +
+                prog.global.num_elem()
+        };
+        prev.read_slice(prev_from,pos+off,len,arr)
+    }
+    fn write<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = {
+            let prog = prev.get(prev_from);
+            prog.threads.num_elem() +
+                prog.global.num_elem()
+        };
+        prev.write(prev_from,pos+off,e,arr,em)
+    }
+    fn write_slice<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &mut Prev::From,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = {
+            let prog = prev.get(prev_from);
+            prog.threads.num_elem() +
+                prog.global.num_elem()
+        };
+        prev.write_slice(prev_from,pos+off,old_len,src,trg,em)
+    }
+}
+
+impl<'a,V: HasSorts> SimplePathEl<'a> for AuxPath<'a,V> {
+    type From = Program<'a,V>;
+    type To   = Aux;
+    fn get<'b>(&self,obj: &'b Self::From)
+               -> &'b Self::To where 'a: 'b {
+        &obj.aux
+    }
+    fn get_mut<'c>(&self,from: &'c mut Self::From)
+                   -> &'c mut Self::To where 'a: 'c {
+        &mut from.aux
+    }
+}
+
+impl<'a,V: HasSorts,Em: Embed> PathEl<'a,Em> for AuxPath<'a,V> {
+    fn read<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        let off = {
+            let prog = prev.get(prev_from);
+            prog.threads.num_elem() +
+                prog.global.num_elem() +
+                prog.heap.num_elem()
+        };
+        prev.read(prev_from,pos+off,arr,em)
+    }
+    fn read_slice<'c,Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        len: usize,
+        arr: &'c [Em::Expr])
+        -> Option<&'c [Em::Expr]> {
+        let off = {
+            let prog = prev.get(prev_from);
+            prog.threads.num_elem() +
+                prog.global.num_elem() +
+                prog.heap.num_elem()
+        };
+        prev.read_slice(prev_from,pos+off,len,arr)
+    }
+    fn write<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = {
+            let prog = prev.get(prev_from);
+            prog.threads.num_elem() +
+                prog.global.num_elem() +
+                prog.heap.num_elem()
+        };
+        prev.write(prev_from,pos+off,e,arr,em)
+    }
+    fn write_slice<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &mut Prev::From,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = {
+            let prog = prev.get(prev_from);
+            prog.threads.num_elem() +
+                prog.global.num_elem() +
+                prog.heap.num_elem()
+        };
+        prev.write_slice(prev_from,pos+off,old_len,src,trg,em)
+    }
+}
+
+impl<'a,V> SimplePathEl<'a> for StepPath<'a,V> {
+    type From = ProgramInput<'a,V>;
+    type To   = Step<'a>;
+    fn get<'b>(&self,obj: &'b Self::From)
+               -> &'b Self::To where 'a: 'b {
+        &obj.step
+    }
+    fn get_mut<'c>(&self,from: &'c mut Self::From)
+                   -> &'c mut Self::To where 'a: 'c {
+        &mut from.step
+    }
+}
+
+impl<'a,V,Em: Embed> PathEl<'a,Em> for StepPath<'a,V> {
+    fn read<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        prev.read(prev_from,pos,arr,em)
+    }
+    fn read_slice<'c,Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        len: usize,
+        arr: &'c [Em::Expr])
+        -> Option<&'c [Em::Expr]> {
+        prev.read_slice(prev_from,pos,len,arr)
+    }
+    fn write<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write(prev_from,pos,e,arr,em)
+    }
+    fn write_slice<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &mut Prev::From,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write_slice(prev_from,pos,old_len,src,trg,em)
+    }
+}
+
+impl<'a,V: HasSorts> SimplePathEl<'a> for NondetPath<'a,V> {
+    type From = ProgramInput<'a,V>;
+    type To   = Nondet<'a,V>;
+    fn get<'b>(&self,obj: &'b Self::From)
+               -> &'b Self::To where 'a: 'b {
+        &obj.nondet
+    }
+    fn get_mut<'c>(&self,from: &'c mut Self::From)
+                   -> &'c mut Self::To where 'a: 'c {
+        &mut from.nondet
+    }
+}
+
+impl<'a,V: HasSorts,Em: Embed> PathEl<'a,Em> for NondetPath<'a,V> {
+    fn read<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        let off = prev.get(prev_from).step.num_elem();
+        prev.read(prev_from,pos+off,arr,em)
+    }
+    fn read_slice<'c,Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        len: usize,
+        arr: &'c [Em::Expr])
+        -> Option<&'c [Em::Expr]> {
+        let off = prev.get(prev_from).step.num_elem();
+        prev.read_slice(prev_from,pos+off,len,arr)
+    }
+    fn write<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &Prev::From,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = prev.get(prev_from).step.num_elem();
+        prev.write(prev_from,pos+off,e,arr,em)
+    }
+    fn write_slice<Prev: Path<'a,Em,To=Self::From>>(
+        &self,
+        prev: &Prev,
+        prev_from: &mut Prev::From,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        let off = prev.get(prev_from).step.num_elem();
+        prev.write_slice(prev_from,pos+off,old_len,src,trg,em)
+    }
+}
+
+/*
 impl<'a,V : Bytes+Clone> ProgramInput<'a,V> {
     pub fn new() -> Self {
         ProgramInput { step: Choice::new(),
@@ -399,9 +796,9 @@ fn decompose_program_input<'a,'b,V>(x: OptRef<'a,ProgramInput<'b,V>>)
         OptRef::Owned(rx) => (OptRef::Owned(rx.step),
                               OptRef::Owned(rx.nondet))
     }
-}
+}*/
 
-impl<'b,V : HasSorts> HasSorts for Program<'b,V> {
+impl<'b,V: HasSorts> HasSorts for Program<'b,V> {
     fn num_elem(&self) -> usize {
         self.threads.num_elem() +
             self.global.num_elem() +
@@ -428,65 +825,74 @@ impl<'b,V : HasSorts> HasSorts for Program<'b,V> {
     }
 }
 
-impl<'b,V : Bytes+FromConst<'b>+Clone> Composite for Program<'b,V> {
-    fn combine<'a,Em,FComb,FL,FR>(x: OptRef<'a,Self>,y: OptRef<'a,Self>,
-                                  inp_x: Transf<Em>,inp_y: Transf<Em>,
-                                  comb: &FComb,only_l: &FL,only_r: &FR,em: &mut Em)
-                                  -> Result<Option<(OptRef<'a,Self>,Transf<Em>)>,Em::Error>
-        where Em : Embed,
-              FComb : Fn(Transf<Em>,Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
-              FL : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
-              FR : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error> {
-        let (thr_x,inp_thr_x,
-             glb_x,inp_glb_x,
-             hp_x,inp_hp_x,
-             aux_x,inp_aux_x) = decompose_program(x,inp_x);
-        let (thr_y,inp_thr_y,
-             glb_y,inp_glb_y,
-             hp_y,inp_hp_y,
-             aux_y,inp_aux_y) = decompose_program(y,inp_y);
+impl<'a,V: Bytes<'a>+FromConst<'a>+Debug> Composite<'a> for Program<'a,V> {
+    fn combine<Em,PL,PR,FComb,FL,FR>(
+        pl: &PL,froml: &PL::From,arrl: &[Em::Expr],
+        pr: &PR,fromr: &PR::From,arrr: &[Em::Expr],
+        comb: &FComb,only_l: &FL,only_r: &FR,
+        res: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<Option<Self>,Em::Error>
+        where
+        Em: Embed,
+        PL: Path<'a,Em,To=Self>,
+        PR: Path<'a,Em,To=Self>,
+        FComb: Fn(Em::Expr,Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
+        FL: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
+        FR: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error> {
 
-        if aux_x.as_ref()!=aux_y.as_ref() {
-            return Ok(None)
-        }
+        let thr_l = pl.clone().then(Self::threads());
+        let thr_r = pr.clone().then(Self::threads());
+
+        let nthr = match Threads::combine(&thr_l,froml,arrl,
+                                          &thr_r,fromr,arrr,
+                                          comb,only_l,only_r,
+                                          res,em)? {
+            None => return Ok(None),
+            Some(r) => r
+        };
+
+        let glb_l = pl.clone().then(Self::globals());
+        let glb_r = pr.clone().then(Self::globals());
+
+        let nglb = match Globals::combine(&glb_l,froml,arrl,
+                                          &glb_r,fromr,arrr,
+                                          comb,only_l,only_r,
+                                          res,em)? {
+            None => return Ok(None),
+            Some(r) => r
+        };
         
-        let (thr,inp_thr) = match Assoc::combine(thr_x,thr_y,
-                                                 inp_thr_x,inp_thr_y,
-                                                 comb,only_l,only_r,em)? {
+        let hp_l = pl.clone().then(Self::heap());
+        let hp_r = pr.clone().then(Self::heap());
+        
+        let nhp = match Heap::combine(&hp_l,froml,arrl,
+                                      &hp_r,fromr,arrr,
+                                      comb,only_l,only_r,
+                                      res,em)? {
             None => return Ok(None),
             Some(r) => r
         };
 
-        let (glb,inp_glb) = match Assoc::combine(glb_x,glb_y,
-                                                 inp_glb_x,inp_glb_y,
-                                                 comb,only_l,only_r,em)? {
+        let aux_l = pl.clone().then(Self::aux());
+        let aux_r = pr.clone().then(Self::aux());
+        
+        let naux = match Aux::combine(&aux_l,froml,arrl,
+                                      &aux_r,fromr,arrr,
+                                      comb,only_l,only_r,
+                                      res,em)? {
             None => return Ok(None),
             Some(r) => r
         };
-
-        let (hp,inp_hp) = match Assoc::combine(hp_x,hp_y,
-                                               inp_hp_x,inp_hp_y,
-                                               comb,only_l,only_r,em)? {
-            None => return Ok(None),
-            Some(r) => r
-        };
-
-        let (aux,inp_aux) = match Choice::combine(aux_x,aux_y,
-                                                  inp_aux_x,inp_aux_y,
-                                                  comb,only_l,only_r,em)? {
-            None => return Ok(None),
-            Some(r) => r
-        };
-
-        Ok(Some((OptRef::Owned(Program { threads: thr.as_obj(),
-                                         global: glb.as_obj(),
-                                         heap: hp.as_obj(),
-                                         aux: aux.as_obj() }),
-                 Transformation::concat(&[inp_thr,inp_glb,inp_hp,inp_aux]))))
+        
+        Ok(Some(Program { threads: nthr,
+                          global: nglb,
+                          heap: nhp,
+                          aux: naux }))
     }
 }
 
-impl<'b,V : HasSorts> HasSorts for ProgramInput<'b,V> {
+impl<'b,V: HasSorts> HasSorts for ProgramInput<'b,V> {
     fn num_elem(&self) -> usize {
         self.step.num_elem() +
             self.nondet.num_elem()
@@ -503,150 +909,49 @@ impl<'b,V : HasSorts> HasSorts for ProgramInput<'b,V> {
     }
 }
 
-impl<'b,V : Bytes + Clone> Composite for ProgramInput<'b,V> {
-    fn combine<'a,Em,FComb,FL,FR>(x: OptRef<'a,Self>,y: OptRef<'a,Self>,
-                                  inp_x: Transf<Em>,inp_y: Transf<Em>,
-                                  comb: &FComb,only_l: &FL,only_r: &FR,em: &mut Em)
-                                  -> Result<Option<(OptRef<'a,Self>,Transf<Em>)>,Em::Error>
-        where Em : Embed,
-              FComb : Fn(Transf<Em>,Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
-              FL : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
-              FR : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error> {
+impl<'a,V: Bytes<'a>> Composite<'a> for ProgramInput<'a,V> {
+    fn combine<Em,PL,PR,FComb,FL,FR>(
+        pl: &PL,froml: &PL::From,arrl: &[Em::Expr],
+        pr: &PR,fromr: &PR::From,arrr: &[Em::Expr],
+        comb: &FComb,only_l: &FL,only_r: &FR,
+        res: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<Option<Self>,Em::Error>
+        where
+        Em: Embed,
+        PL: Path<'a,Em,To=Self>,
+        PR: Path<'a,Em,To=Self>,
+        FComb: Fn(Em::Expr,Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
+        FL: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
+        FR: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error> {
 
-        let (step_x,nondet_x) = decompose_program_input(x);
-        let (step_y,nondet_y) = decompose_program_input(y);
+        let step_l = pl.clone().then(Self::step());
+        let step_r = pr.clone().then(Self::step());
 
-        let sz1_x = step_x.as_ref().num_elem();
-        let sz1_y = step_y.as_ref().num_elem();
-        
-        let (step,step_inp) = match Choice::combine(step_x,step_y,
-                                                    Transformation::view(0,sz1_x,inp_x.clone()),
-                                                    Transformation::view(0,sz1_y,inp_y.clone()),
-                                                    comb,only_l,only_r,em)? {
+        let nstep = match Step::combine(&step_l,froml,arrl,
+                                        &step_r,fromr,arrr,
+                                        comb,only_l,only_r,
+                                        res,em)? {
             None => return Ok(None),
             Some(r) => r
         };
 
-        let sz2_x = nondet_x.as_ref().num_elem();
-        let sz2_y = nondet_y.as_ref().num_elem();
+        let nd_l = pl.clone().then(Self::nondet());
+        let nd_r = pr.clone().then(Self::nondet());
 
-        let (nondet,nondet_inp) = match Assoc::combine(nondet_x,nondet_y,
-                                                       Transformation::view(sz1_x,sz2_x,inp_x),
-                                                       Transformation::view(sz1_y,sz2_y,inp_y),
-                                                       comb,only_l,only_r,em)? {
+        let nnd = match Nondet::combine(&nd_l,froml,arrl,
+                                        &nd_r,fromr,arrr,
+                                        comb,only_l,only_r,
+                                        res,em)? {
             None => return Ok(None),
             Some(r) => r
         };
 
-        Ok(Some((OptRef::Owned(ProgramInput { step: step.as_obj(),
-                                              nondet: nondet.as_obj() }),
-                 Transformation::concat(&[step_inp,nondet_inp]))))
+        Ok(Some(ProgramInput { step: nstep,
+                               nondet: nnd }))
     }
 }
-
-// Views for Program
-
-#[derive(Clone,PartialEq,Eq,Debug)]
-pub struct ThreadsView<'a,V : 'a>(PhantomData<&'a V>);
-
-#[derive(Clone,PartialEq,Eq,Debug)]
-pub struct GlobalsView<'a,V : 'a>(PhantomData<&'a V>);
-
-#[derive(Clone,PartialEq,Eq,Debug)]
-pub struct HeapView<'a,V : 'a>(PhantomData<&'a V>);
-
-impl<'a,V : 'a+Bytes+FromConst<'a>> View for ThreadsView<'a,V> {
-    type Viewed = Program<'a,V>;
-    type Element = Threads<'a,V>;
-    fn get_el<'b>(&self,prog: &'b Self::Viewed)
-                  -> &'b Self::Element where Self : 'b {
-        &prog.threads
-    }
-    fn get_el_ext<'b>(&self,prog: &'b Self::Viewed)
-                      -> (usize,&'b Self::Element) where Self : 'b {
-        (0,&prog.threads)
-    }
-}
-
-impl<'a,V : 'a+Bytes+FromConst<'a>> View for GlobalsView<'a,V> {
-    type Viewed = Program<'a,V>;
-    type Element = Globals<'a,V>;
-    fn get_el<'b>(&self,prog: &'b Self::Viewed)
-                  -> &'b Self::Element where Self : 'b {
-        &prog.global
-    }
-    fn get_el_ext<'b>(&self,prog: &'b Self::Viewed)
-                      -> (usize,&'b Self::Element) where Self : 'b {
-        (prog.threads.num_elem(),&prog.global)
-    }
-}
-
-impl<'a,V : 'a+Bytes+FromConst<'a>> View for HeapView<'a,V> {
-    type Viewed = Program<'a,V>;
-    type Element = Heap<'a,V>;
-    fn get_el<'b>(&self,prog: &'b Self::Viewed)
-                  -> &'b Self::Element where Self : 'b {
-        &prog.heap
-    }
-    fn get_el_ext<'b>(&self,prog: &'b Self::Viewed)
-                      -> (usize,&'b Self::Element) where Self : 'b {
-        (prog.threads.num_elem()+
-         prog.global.num_elem(),&prog.heap)
-    }
-}
-
-impl<'a,V : 'a+Bytes+FromConst<'a>> ViewMut for ThreadsView<'a,V> {
-    fn get_el_mut<'b>(&self,prog: &'b mut Self::Viewed)
-                      -> &'b mut Self::Element where Self : 'b {
-        &mut prog.threads
-    }
-    fn get_el_mut_ext<'b>(&self,prog: &'b mut Self::Viewed)
-                          -> (usize,&'b mut Self::Element) where Self : 'b {
-        (0,&mut prog.threads)
-    }
-}
-
-impl<'a,V : 'a+Bytes+FromConst<'a>> ViewMut for GlobalsView<'a,V> {
-    fn get_el_mut<'b>(&self,prog: &'b mut Self::Viewed)
-                      -> &'b mut Self::Element where Self : 'b {
-        &mut prog.global
-    }
-    fn get_el_mut_ext<'b>(&self,prog: &'b mut Self::Viewed)
-                          -> (usize,&'b mut Self::Element) where Self : 'b {
-        (prog.threads.num_elem(),&mut prog.global)
-    }
-}
-
-impl<'a,V : 'a+Bytes+FromConst<'a>> ViewMut for HeapView<'a,V> {
-    fn get_el_mut<'b>(&self,prog: &'b mut Self::Viewed)
-                      -> &'b mut Self::Element where Self : 'b {
-        &mut prog.heap
-    }
-    fn get_el_mut_ext<'b>(&self,prog: &'b mut Self::Viewed)
-                          -> (usize,&'b mut Self::Element) where Self : 'b {
-        (prog.threads.num_elem()+
-         prog.global.num_elem(),&mut prog.heap)
-    }
-}
-
-impl<'a,V> ThreadsView<'a,V> {
-    pub fn new() -> Self {
-        ThreadsView(PhantomData)
-    }
-}
-
-impl<'a,V> GlobalsView<'a,V> {
-    pub fn new() -> Self {
-        GlobalsView(PhantomData)
-    }
-}
-
-impl<'a,V> HeapView<'a,V> {
-    pub fn new() -> Self {
-        HeapView(PhantomData)
-    }
-}
-
+/*
 pub struct CurrentThreadIter<'a,V,Em : DeriveValues> {
     phantom: PhantomData<V>,
     step: Option<Transf<Em>>,
@@ -1647,3 +1952,4 @@ impl<'a,'b,Em : DeriveValues,V : Bytes+FromConst<'a>+Debug
         Ok(ret)
     }
 }
+*/
