@@ -8,6 +8,11 @@ pub mod library;
 
 use smtrs::composite::*;
 use smtrs::composite::singleton::*;
+use smtrs::composite::vec::*;
+use smtrs::composite::map::*;
+use smtrs::composite::stack::*;
+use smtrs::composite::choice::*;
+use smtrs::composite::tuple::*;
 use smtrs::embed::{Embed,DeriveConst,DeriveValues};
 use smtrs::types::{Sort,SortKind,Value};
 use num_bigint::BigUint;
@@ -16,11 +21,11 @@ use std::ops::Shl;
 use std::fmt::Debug;
 use std::collections::HashMap;
 use self::mem::{Bytes,FromConst,MemSlice,MemObj};
-/*use self::frame::*;
+use self::frame::*;
 use self::thread::*;
 use self::program::*;
 use self::pointer::*;
-use self::library::Library;*/
+use self::library::Library;
 use llvm_ir;
 use llvm_ir::Module;
 use llvm_ir::datalayout::{DataLayout};
@@ -29,6 +34,8 @@ use std::iter::{Once,once};
 use std::cmp::Ordering;
 use std::hash::{Hash,Hasher};
 use std::fmt;
+use std::marker::PhantomData;
+use std::mem::swap;
 
 #[derive(PartialEq,Eq,PartialOrd,Ord,Hash,Copy,Clone,Debug)]
 pub struct InstructionRef<'a> {
@@ -36,8 +43,8 @@ pub struct InstructionRef<'a> {
     pub basic_block: &'a String,
     pub instruction: usize
 }
-/*
-pub enum TrErr<'a,V: Bytes<'a> + Clone,Err> {
+
+pub enum TrErr<'a,V: Bytes<'a>+Clone,Err> {
     EmErr(Err),
     InputNeeded(ProgramInput<'a,V>)
 }
@@ -80,19 +87,24 @@ impl<'a> InstructionRef<'a> {
                          basic_block: self.basic_block,
                          instruction: self.instruction + 1 }
     }
-}*/
+}
 
 const INDEX_WIDTH: usize = 32;
-/*
-pub fn translate_init<'a,'b,V,Em>(module: &'a Module,
-                                  entry_fun: &'a String,
-                                  args: Vec<V>,
-                                  inp_args: Transf<Em>,
-                                  aux: Aux,
-                                  aux_inp: Transf<Em>,
-                                  em: &mut Em)
-                                  -> Result<(OptRef<'b,Program<'a,V>>,Transf<Em>),Em::Error>
-    where V : Bytes+FromConst<'a>+Clone, Em : Embed {
+
+pub fn translate_init<'a,FArgs,FAux,V,Em>(
+    module: &'a Module,
+    entry_fun: &'a String,
+    args: FArgs,
+    aux: FAux,
+    res: &mut Vec<Em::Expr>,
+    em: &mut Em)
+    -> Result<Program<'a,V>,Em::Error>
+    where FArgs: FnOnce(&mut Vec<Em::Expr>,&mut Em)
+                        -> Result<CompVec<V>,Em::Error>,
+          FAux: FnOnce(&mut Vec<Em::Expr>,&mut Em)
+                       -> Result<Aux,Em::Error>,
+          V: 'a+Bytes<'a>+FromConst<'a>+Clone,
+          Em: Embed {
 
     let main_fun = module.functions.get(entry_fun).expect("Entry function not found in module");
     let main_blk = match main_fun.body {
@@ -103,88 +115,83 @@ pub fn translate_init<'a,'b,V,Em>(module: &'a Module,
             &bbs[0].name
         }
     };
-    
-    let (values_main,inp_values_main) = assoc_empty()?;
-    let (act_main0,inp_act_main0) = choice_empty();
-    let (act_main,inp_act_main) = choice_insert(OptRef::Owned(act_main0),inp_act_main0,
-                                                Transformation::const_bool(true,em)?,
-                                                OptRef::Owned(Data(InstructionRef { function: entry_fun,
-                                                                                    basic_block: main_blk,
-                                                                                    instruction: 0 })),
-                                                Transformation::id(0))?;
-    let (phi_main,inp_phi_main) = choice_empty();
 
-    let (cf_main,inp_cf_main) = call_frame(values_main,inp_values_main,
-                                           OptRef::Owned(args),inp_args,
-                                           act_main,inp_act_main,
-                                           OptRef::Owned(phi_main),inp_phi_main);
-    let (prev_main0,inp_prev_main0) = choice_empty();
-    let (prev_main,inp_prev_main) = choice_insert(OptRef::Owned(prev_main0),inp_prev_main0,
-                                                  Transformation::const_bool(true,em)?,
-                                                  OptRef::Owned(Data(None)),
-                                                  Transformation::id(0))?;
-    let (alloc_main,inp_alloc_main) = assoc_empty()?;
-    let (fr_main,inp_fr_main) = frame(prev_main,inp_prev_main,alloc_main,inp_alloc_main);
-
-    let (cs_el,inp_cs_el) = tuple(cf_main,fr_main,inp_cf_main,inp_fr_main);
-    
-    let (css,inp_css) = bv_vec_stack_singleton(INDEX_WIDTH,cs_el,inp_cs_el,em)?;
-    let (cs_main0,inp_cs_main0) = assoc_empty()?;
-    let (cs_main,inp_cs_main) = assoc_insert(cs_main0,inp_cs_main0,
-                                             &(None,entry_fun),
-                                             css,inp_css)?;
-    let (st_main,inp_st_main) = assoc_empty()?;
-    let (top_main0,inp_top_main0) = choice_empty();
-    let (top_main,inp_top_main) = choice_insert(OptRef::Owned(top_main0),inp_top_main0,
-                                                Transformation::const_bool(true,em)?,
-                                                OptRef::Owned(Data(Some(ContextId::Call((None,entry_fun))))),
-                                                Transformation::id(0))?;
-    let ret = OptRef::Owned(None);
-    let inp_ret = Transformation::id(0);
-
-    let (thread_main,inp_thread_main) = thread(cs_main,inp_cs_main,
-                                               st_main,inp_st_main,
-                                               top_main,inp_top_main,
-                                               ret,inp_ret);
-
-    let thread_pool = OptRef::Owned(vec![thread_main.as_obj()]);
-    let inp_thread_pool = inp_thread_main;
-    
-    let (threads0,inp_threads0) = assoc_empty()?;
-    let (threads,inp_threads) = assoc_insert(threads0,inp_threads0,
-                                             &(None,entry_fun),
-                                             thread_pool,inp_thread_pool)?;
-
-    let (globals0,inp_globals0) = assoc_empty()?;
-    let mut globals = globals0;
-    let mut inp_globals = inp_globals0;
-
-    for (name,glob) in module.globals.iter() {
-        let obj = match glob.initialization {
-            None => {
-                let sz = module.datalayout.type_size_in_bits(&glob.types,&module.types);
-                MemSlice(vec![MemObj::FreshObj(sz as usize)])
-            },
-            Some(ref init) => translate_global(&module.datalayout,
-                                               init,
-                                               &glob.types,
-                                               &module.types)
-        };
-        let (nglobals,inp_nglobals) = assoc_insert(globals,
-                                                   inp_globals,
-                                                   &name,
-                                                   OptRef::Owned(obj),
-                                                   Transformation::id(0))?;
-        globals = nglobals;
-        inp_globals = inp_nglobals;
-    }
-
-    let (heap,inp_heap) = assoc_empty()?;
-    
-    Ok(program(threads,inp_threads,globals,inp_globals,heap,inp_heap,OptRef::Owned(aux),aux_inp))
+    Program::construct(
+        |res,em| { // Threads
+            Assoc::singleton((None,entry_fun),|res,em| {
+                CompVec::singleton(
+                    |res,em| {
+                        Thread::construct(
+                            |res,em| { // Call stack
+                                Assoc::singleton((None,entry_fun),|res,em| {
+                                    BitVecVectorStack::singleton(
+                                        INDEX_WIDTH,
+                                        |res,em| tuple(|res,em| {
+                                            CallFrame::construct(
+                                                Assoc::empty,
+                                                args,
+                                                |res,em| {
+                                                    Choice::singleton(|_,_| {
+                                                        Ok(Data(InstructionRef { function: entry_fun,
+                                                                                 basic_block: main_blk,
+                                                                                 instruction: 0 }))
+                                                    },res,em)
+                                                },
+                                                Choice::empty,
+                                                res,em)
+                                        },|res,em| {
+                                            Frame::construct(
+                                                |res,em| {
+                                                    Choice::singleton(|_,_| {
+                                                        Ok(Data(None))
+                                                    },res,em)
+                                                },
+                                                Assoc::empty,
+                                                res,em)
+                                        },res,em),
+                                        res,em)
+                                },res,em)
+                            },
+                            Assoc::empty, // Stack
+                            |res,em| { // Stack top
+                                Choice::singleton(
+                                    |_,_| {
+                                        Ok(Data(Some(ContextId::Call((None,entry_fun)))))
+                                    },res,em)
+                            },
+                            |_,_| { Ok(None) }, // Return value
+                            res,em)
+                    },res,em)
+            },res,em)
+        },
+        |res,em| { // Globals
+            Assoc::construct(
+                module.globals.iter(),
+                false,
+                |(name,glob),res,em| {
+                    let el = match glob.initialization {
+                        None => {
+                            let sz = module.datalayout.type_size_in_bits(&glob.types,&module.types);
+                            let vec = CompVec::singleton(
+                                |_,_| Ok(MemObj::FreshObj(sz as usize)),
+                                res,em)?;
+                            MemSlice(vec)
+                        },
+                        Some(ref init) => translate_global(&module.datalayout,
+                                                           init,
+                                                           &glob.types,
+                                                           &module.types,
+                                                           res,em)?
+                    };
+                    Ok((name,el))
+                },res,em)
+        },
+        Assoc::empty, // Heap
+        aux,
+        res,em)
 }
 
-fn filter_ctx_id<'a,V>(cf_id: &CallId<'a>,el: (ThreadView<'a,V>,&Data<Option<ContextId<'a>>>))
+/*fn filter_ctx_id<'a,V>(cf_id: &CallId<'a>,el: (ThreadView<'a,V>,&Data<Option<ContextId<'a>>>))
                        -> Option<(ThreadView<'a,V>,ContextId<'a>)> {
     match (el.1).0 {
         None => None,
@@ -209,69 +216,58 @@ fn conds_true<Em : DeriveConst>(conds: &Vec<Transf<Em>>,exprs: &[Em::Expr],em: &
         }
     }
     Ok(true)
-}
+}*/
 
-fn update_activation<'a,Em : Embed,V : ViewMut<Element=Activation<'a>>>(
-    view: &V,
-    viewed: &mut V::Viewed,
-    conds: &Vec<Transf<Em>>,
+fn update_activation<'a,Em : Embed,From,P: Path<'a,Em,From,To=Activation<'a>>>(
+    path: &P,
+    from: &mut From,
+    cont: &mut Vec<Em::Expr>,
+    conds: &Vec<Em::Expr>,
     instr_id: InstructionRef<'a>,
-    updates: &mut Updates<Em>,
-    orig_inp: Transf<Em>,
     em: &mut Em
 ) -> Result<(),Em::Error> {
 
-    let (nacts,nacts_inp) = {
-        let (acts,acts_inp) = if conds.len()==0 {
-            let (r,inp) = choice_empty();
-            (OptRef::Owned(r),inp)
-        } else {
-            let (r,inp) = view.get_with_upd(viewed,updates,orig_inp);
-            (OptRef::Ref(r),inp)
-        };
-        let rcond = if conds.len()==0 {
-            let c = em.const_bool(true)?;
-            Transformation::constant(vec![c])
-        } else {
-            Transformation::and(conds.clone())
-        };
-        let (nacts,nacts_inp) = choice_set_chosen(acts,acts_inp,rcond,
-                                                  OptRef::Owned(Data(instr_id)),
-                                                  Transformation::id(0))?;
-        (nacts.as_obj(),nacts_inp)
+    let rcond = if conds.len()==0 {
+        let mut ch0_inp = Vec::new();
+        let ch0 = Choice::empty(&mut ch0_inp,em)?;
+        path.set(from,cont,ch0,&mut ch0_inp,em)?;
+        em.const_bool(true)?
+    } else {
+        em.and(conds.clone())?
     };
-    view.write(nacts,nacts_inp,viewed,updates);
-    Ok(())
+    let mut inp = Vec::new();
+    Choice::set_chosen(path,from,cont,
+                       Data(instr_id),&mut inp,rcond,em)
 }
 
-pub trait TranslationCfg<Em : Embed> {
+pub trait TranslationCfg<Em: Embed> {
     fn change_thread_activation(
         &mut self,
-        _:&mut Vec<Transf<Em>>,_:usize,_:&mut Em)
+        _:&mut Vec<Em::Expr>,_:usize,_:&mut Em)
         -> Result<(),Em::Error> {
         Ok(())
     }
     fn change_context_activation(
         &mut self,
-        _:&mut Vec<Transf<Em>>,_:usize,_:&mut Em)
+        _:&mut Vec<Em::Expr>,_:usize,_:&mut Em)
         -> Result<(),Em::Error> {
         Ok(())
     }
     fn change_call_frame_activation(
         &mut self,
-        _:&mut Vec<Transf<Em>>,_:usize,_:&mut Em)
+        _:&mut Vec<Em::Expr>,_:usize,_:&mut Em)
         -> Result<(),Em::Error> {
         Ok(())
     }
     fn change_instr_activation(
         &mut self,
-        _:&mut Vec<Transf<Em>>,_:usize,_:&mut Em)
+        _:&mut Vec<Em::Expr>,_:usize,_:&mut Em)
         -> Result<(),Em::Error> {
         Ok(())
     }
     fn change_instr_not_blocking(
         &mut self,
-        _:&mut Vec<Transf<Em>>,_:usize,_:&mut Em)
+        _:&mut Vec<Em::Expr>,_:usize,_:&mut Em)
         -> Result<(),Em::Error> {
         Ok(())
     }
@@ -280,23 +276,23 @@ pub trait TranslationCfg<Em : Embed> {
 pub struct DefaultCfg {}
 
 impl<Em : Embed> TranslationCfg<Em> for DefaultCfg {}
-
-fn eval_phi<'b,ValsView,V,Em>(m: &'b Module,
-                              fun: &'b String,
-                              src: &'b String,
-                              trg: &'b String,
-                              vals_view: &ValsView,
-                              call_frame: &CallFrame<'b,V>,
-                              call_frame_inp: Transf<Em>,
-                              conds: &Vec<Transf<Em>>,
-                              nprog: &mut Program<'b,V>,
-                              updates: &mut Updates<Em>,
-                              prog_inp: Transf<Em>,
-                              exprs: &[Em::Expr],
-                              em: &mut Em) -> Result<(),Em::Error>
-    where ValsView : ViewMut<Viewed=Program<'b,V>,Element=Assoc<&'b String,V>>+Clone,
-          V : 'b+Bytes+FromConst<'b>+IntValue+Vector+Pointer<'b>+FromMD<'b>+Debug,
-          Em : DeriveValues {
+/*
+fn eval_phi<'a,'b,ValsView,V,Em>(m: &'b Module,
+                                 fun: &'b String,
+                                 src: &'b String,
+                                 trg: &'b String,
+                                 vals_view: &ValsView,
+                                 call_frame: &CallFrame<'b,V>,
+                                 call_frame_inp: Transf<Em>,
+                                 conds: &Vec<Transf<Em>>,
+                                 nprog: &mut Program<'b,V>,
+                                 updates: &mut Updates<Em>,
+                                 prog_inp: Transf<Em>,
+                                 exprs: &[Em::Expr],
+                                 em: &mut Em) -> Result<(),Em::Error>
+    where ValsView: ViewMut<Viewed=Program<'b,V>,Element=Assoc<&'b String,V>>+Clone,
+          V: 'b+Bytes+FromConst<'b>+IntValue+Vector+Pointer<'b>+FromMD<'b>+Debug,
+          Em: DeriveValues {
     let trg_blk = match m.functions.get(fun) {
         None => panic!("Function not found"),
         Some(ref fun) => match fun.body {
@@ -329,7 +325,7 @@ fn eval_phi<'b,ValsView,V,Em>(m: &'b Module,
         }
     }
     Ok(())
-}
+}*/
 
 pub fn translate_instr<'b,V,Cfg,Lib,Em>(
     m: &'b Module,
@@ -339,25 +335,25 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
     cf_id: CallId<'b>,
     instr_id: InstructionRef<'b>,
     instr: &'b llvm_ir::Instruction,
-    prog: &Program<'b,V>,
+    prog: &mut Program<'b,V>,
     inp: &ProgramInput<'b,V>,
-    prog_inp: Transf<Em>,
-    inp_inp: Transf<Em>,
-    exprs: &[Em::Expr],
+    prog_inp: &mut Vec<Em::Expr>,
+    inp_inp: &[Em::Expr],
     em: &mut Em)
-    -> Result<(Program<'b,V>,
-               Transf<Em>),TrErr<'b,V,Em::Error>>
-    where V : 'b+Bytes+FromConst<'b>+IntValue+Vector+Pointer<'b>+FromMD<'b>+Debug,
-          Cfg : TranslationCfg<Em>,
-          Lib : Library<'b,V,Em>,
-          Em : DeriveValues {
-    debug_assert_eq!(prog.num_elem(),prog_inp.size());
-    debug_assert_eq!(inp.num_elem(),inp_inp.size());
+    -> Result<(),TrErr<'b,V,Em::Error>>
+    where V: 'b+Bytes<'b>+FromConst<'b>+IntValue<'b>+Vector<'b>+Pointer<'b>+FromMD<'b>+Debug,
+          Cfg: TranslationCfg<Em>,
+          Lib: Library<'b,V,Em>,
+          Em: DeriveValues,
+          Em::Expr: 'b {
+    debug_assert_eq!(prog.num_elem(),prog_inp.len());
+    debug_assert_eq!(inp.num_elem(),inp_inp.len());
+
     let (step,thr_idx) = if prog.is_single_threaded() {
-        let idx = em.const_bitvec(STEP_BW,BigUint::from(0 as u8))?;
-        (None,Transformation::constant(vec![idx]))
+        let idx = em.const_bitvec(STEP_BW,BigUint::from(0u8))?;
+        (None,idx)
     } else {
-        match program_input_thread_activation(inp,inp_inp,&thread_id,em)? {
+        match ProgramInput::thread_activation(&thread_id,Id::new(),inp,inp_inp,em)? {
             Some((step,idx)) => (Some(step),idx),
             None => {
                 let mut rinp = inp.clone();
@@ -366,176 +362,162 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
             }
         }
     };
-
-    
+    let thread_pool = Assoc::lookup(then(Id,ThreadsPath),
+                                    prog,&thread_id).expect("Thread not found");
+    let mut thread_iter = CompVec::access_dyn(thread_pool,
+                                              prog,thr_idx,em)?;
     let mut conds = Vec::new();
-    let mut nprog = prog.clone();
-    let mut updates = Vec::new();
-
-    let threads_view = ThreadsView::new();
-    let thread_pool_view = threads_view.then(AssocView::new(thread_id));
-    
-    let thread_pool = match thread_pool_view.get_el_opt(prog) {
-        None => return Ok((nprog,finish_updates(updates,prog_inp))),
-        Some(p) => p
-    };
-
-    let mut thread_iter = access_dyn(thread_pool,thr_idx,exprs,em)?;
-    // Used only for debugging
-    let mut any_call_frames = false;
-    // Iterate over all possible active threads
-    while let Some(thread_idx) = thread_iter.next(&mut conds,0,em)? {
+    while let Some(thread) = thread_iter.next(&mut conds,0,em)? {
         cfg.change_thread_activation(&mut conds,0,em)?;
-        //println!("THREAD!");
-        let thread_view = thread_pool_view.clone().then(VecView::new(thread_idx));
-
-        let stack_top_view = thread_view.clone().then(StackTopView::new());
-
-        let (stack_top,stack_top_inp) = stack_top_view.get_with_inp(prog,prog_inp.clone());
-
-        let mut top_context_id_iter = stack_top.chosen(stack_top_inp.clone());
-
+        let stack_top = then(thread.clone(),
+                             StackTopPath);
+        let mut stack_top_iter = Choice::choices(stack_top,prog,prog_inp,em)?;
         let cpos = conds.len();
-        while let Some(context_id_view) = top_context_id_iter.next(&mut conds,cpos,em)? {
+        while let Some(context_id_p) = stack_top_iter.next(&mut conds,cpos,em)? {
             cfg.change_context_activation(&mut conds,cpos,em)?;
-            //println!("CONTEXT!");
-            let context_id = &context_id_view.get_el(stack_top).0;
-
             // Handle only matching contexts
-            let fr_id = match context_id {
-                &None => continue,
-                &Some(ContextId::Call(ref cid_)) => if cf_id!=*cid_ {
+            let fr_id = match context_id_p.get(prog).0 {
+                None => continue,
+                Some(ContextId::Call(ref cid_)) => if cf_id!=*cid_ {
                     continue
                 } else {
                     None
                 },
-                &Some(ContextId::Stack(ref cid_,ref id_)) => if cf_id!=*cid_ {
+                Some(ContextId::Stack(ref cid_,ref id_)) => if cf_id!=*cid_ {
                     continue
                 } else {
-                    Some(id_)
+                    Some(id_.clone())
                 }
             };
-
-            let call_stack_view = thread_view.clone().then(CallStackView::new()).then(AssocView::new(cf_id));
-
-            let (call_stack,call_stack_inp) = call_stack_view.get_with_inp(prog,prog_inp.clone());
-
-            let mut call_frame_iter = call_stack.access_top(call_stack_inp.clone(),exprs,em)?;
-
+            let call_stack = Assoc::lookup(then(thread.clone(),
+                                                CallStackPath),
+                                           prog,&cf_id)
+                .expect("Call stack not found");
+            let mut call_frame_iter = BitVecVectorStack::top(call_stack.clone(),
+                                                             prog,prog_inp,
+                                                             em)?;
             // Iterate over all active call frames
             let cpos = conds.len();
-            while let Some(call_frame_view) = call_frame_iter.next(&mut conds,cpos,em)? {
+            while let Some(call_frame) = call_frame_iter.next(&mut conds,cpos,em)? {
                 cfg.change_call_frame_activation(&mut conds,cpos,em)?;
-                //println!("CALL FRAME!");
-                
-                let (call_frame,call_frame_inp) = call_frame_view.clone()
-                    .then(FstView::new())
-                    .get_with_inp(call_stack,call_stack_inp.clone());
+                let cf = then(call_frame.clone(),
+                              Element1Of2);
+                let acts = then(cf.clone(),
+                                ActivationPath);
 
-                let (acts,acts_inp) = ActivationView::new()
-                    .get_with_inp(call_frame,call_frame_inp.clone());
-
-                // Add the instruction activation condition
-                let cpos = conds.len();
-                match acts.condition(acts_inp,&Data(instr_id),&mut conds,cpos) {
+                match Choice::find(acts.clone(),prog,prog_inp,
+                                   |p,from,_,_| Ok(p.get(from).0 == instr_id),
+                                   em)? {
                     None => {
-                        println!("Activation not found {:?}: {:?}",instr_id,acts);
+                        println!("Activation not found: {:?}",instr_id);
                         continue
                     },
-                    Some(_) => {}
+                    Some(act) => {
+                        conds.push(Choice::is_selected(&act,prog,prog_inp,em)?);
+                    }
                 }
                 cfg.change_instr_activation(&mut conds,cpos,em)?;
-                // Used only for debugging
-                any_call_frames = true;
-                
                 match instr.content {
                     llvm_ir::InstructionC::Alloca(ref name,ref tp,ref sz,_) => {
+                        let mut dyn_inp = Vec::new();
                         let dyn = match sz {
                             &None => None,
-                            &Some(ref sz) => Some(translate_value(&m.datalayout,&sz.val,&sz.tp,&m.types,
-                                                                  call_frame,call_frame_inp,
-                                                                  exprs,em)?)
+                            &Some(ref sz) => Some(translate_value(
+                                &m.datalayout,&sz.val,&sz.tp,&m.types,
+                                &cf,prog,prog_inp,
+                                &mut dyn_inp,em)?)
                         };
-                        let stat_bits = m.datalayout.type_size_in_bits(tp,&m.types);
+                        let stat_bits = m.datalayout
+                            .type_size_in_bits(tp,&m.types);
                         let stat_bytes = (stat_bits/8) as usize;
-                        let (sl,sl_inp) = match dyn {
-                            None => MemSlice::alloca(stat_bytes,em),
+                        let mut sl_inp = Vec::new();
+                        let sl = match dyn {
+                            None => MemSlice::alloca(stat_bytes,&mut sl_inp,em)?,
                             Some(_) => panic!("Dynamic sized allocations not supported")
                         };
-                        let (ptr_,mut ptr_inp) = choice_empty();
-                        let mut ptr = OptRef::Owned(ptr_);
+                        let mut ptr_inp = Vec::new();
+                        let mut ptr = Choice::empty(&mut ptr_inp,em)?;
+
                         match fr_id {
                             None => {
-                                let fr_view = call_frame_view.clone()
-                                    .then(SndView::new());
-                                let allocs_view = fr_view.then(AllocationsView::new());
-                                let alloc_pool_view = allocs_view.then(AssocView::new(instr_id));
-                                let (alloc_pool,alloc_pool_inp)
-                                    = match alloc_pool_view.get_opt_with_inp(call_stack,
-                                                                             call_stack_inp.clone()) {
-                                        None => (OptRef::Owned(Vec::new()),Transformation::id(0)),
-                                        Some((p,inp)) => (OptRef::Ref(p),inp)
-                                    };
-                                let (alloc_idx,nalloc_pool,nalloc_pool_inp)
-                                    = vec_pool_alloc(alloc_pool,OptRef::Owned(sl),
-                                                     alloc_pool_inp,sl_inp,
-                                                     &|_,_| false)?;
-                                // Write the updates to the allocations
-                                call_stack_view.clone()
-                                    .then(alloc_pool_view)
-                                    .insert(&mut nprog,nalloc_pool.as_obj(),nalloc_pool_inp,&mut updates);
+                                let fr = then(call_frame.clone(),
+                                              Element2Of2);
+                                let allocs = then(fr,
+                                                  AllocationsPath);
+                                let alloc_pool = match Assoc::lookup(
+                                    allocs.clone(),prog,&instr_id) {
+                                    None => {
+                                        let mut pool_inp = Vec::new();
+                                        let pool = CompVec::new(&mut pool_inp,
+                                                                em)?;
+                                        let alloc_idx = Assoc::insert(&allocs,prog,prog_inp,
+                                                                      instr_id,pool,&mut pool_inp,
+                                                                      em)?;
+                                        then(allocs,alloc_idx)
+                                    },
+                                    Some(p) => p
+                                };
+                                let alloc_idx = CompVec::alloc(&alloc_pool,
+                                                               prog,prog_inp,
+                                                               sl,&mut sl_inp,
+                                                               &|_,_,_,_| Ok(false),em)?;
 
                                 // Generate the new pointer target
-                                let trg = PointerTrg::Stack(thread_id,INDEX_WIDTH,
-                                                            FrameId::Call(cf_id),INDEX_WIDTH,
-                                                            instr_id.clone(),INDEX_WIDTH);
-                                let thread_idx_inp = {
-                                    let e = em.const_bitvec(INDEX_WIDTH,BigUint::from(thread_idx))?;
-                                    Transformation::constant(vec![e])
-                                };
-                                let fr_idx_inp = {
-                                    let e = em.const_bitvec(INDEX_WIDTH,BigUint::from(call_frame_view.idx))?;
-                                    Transformation::constant(vec![e])
-                                };
-                                let alloc_idx_inp = {
-                                    let e = em.const_bitvec(INDEX_WIDTH,BigUint::from(alloc_idx))?;
-                                    Transformation::constant(vec![e])
-                                };
-                                let trg_inp = Transformation::concat(&[thread_idx_inp,
-                                                                       fr_idx_inp,
-                                                                       alloc_idx_inp]);
+                                let mut trg_inp = Vec::new();
+                                let thread_idx = em.const_bitvec(INDEX_WIDTH,BigUint::from(thread.then.0))?;
+                                let fr_idx = em.const_bitvec(INDEX_WIDTH,BigUint::from(call_frame.then.0))?;
+                                let alloc_idx = em.const_bitvec(INDEX_WIDTH,BigUint::from(alloc_idx.0))?;
+                                let trg = PointerTrg::stack(thread_id,
+                                                            thread_idx,
+                                                            FrameId::Call(cf_id),
+                                                            fr_idx,
+                                                            instr_id,
+                                                            alloc_idx,
+                                                            &mut trg_inp,
+                                                            em)?;
+                                
                                 let rcond = if conds.len()==0 {
-                                    Transformation::const_bool(true,em)?
+                                    em.const_bool(true)?
                                 } else {
-                                    Transformation::and(conds.clone())
+                                    em.and(conds.clone())?
                                 };
-                                let (nptr,nptr_inp) = choice_insert(ptr,ptr_inp,rcond,
-                                                                    OptRef::Owned((trg,(Data((stat_bytes,0)),None))),trg_inp)?;
-                                ptr = nptr;
-                                ptr_inp = nptr_inp;
+
+                                Choice::insert(&Id::new(),&mut ptr,&mut ptr_inp,
+                                               (trg,(Data((stat_bytes,0)),None)),
+                                               &mut trg_inp,rcond,em)?;
                             },
                             Some(_) => unimplemented!()
                         }
+                        let mut val_inp = Vec::new();
+                        let val = V::from_pointer(
+                            m.datalayout.pointer_alignment(0).0 as usize,
+                            &Id::new(),&ptr,&ptr_inp[..],
+                            &mut val_inp,em)?;
                         // Insert the pointer
-                        let value_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(ValuesView::new())
-                            .then(AssocView::new(name));
-                        let (val,val_inp) = V::from_pointer(m.datalayout.pointer_alignment(0).0 as usize,
-                                                            ptr,ptr_inp);
-                        value_view.insert_cond(&mut nprog,val.as_obj(),val_inp,&conds,&mut updates,prog_inp.clone(),em)?;
-
-                        // Update instruction activation
-                        let act_view = call_stack_view.clone()
-                            .then(call_frame_view)
-                            .then(FstView::new())
-                            .then(ActivationView::new());
-                        update_activation(&act_view,&mut nprog,&conds,
-                                          instr_id.next(),
-                                          &mut updates,
-                                          prog_inp.clone(),
-                                          em)?;
+                        let values = then(cf.clone(),
+                                          ValuesPath);
+                        match Assoc::lookup(values.clone(),
+                                            prog,&name) {
+                            None => {
+                                Assoc::insert(&values,prog,prog_inp,
+                                              name,val,&mut val_inp,em)?;
+                            },
+                            Some(old_ptr) => {
+                                let rcond = if conds.len()==0 {
+                                    em.const_bool(true)?
+                                } else {
+                                    em.and(conds.clone())?
+                                };
+                                if !old_ptr.set_cond(prog,prog_inp,
+                                                     val,&mut val_inp,
+                                                     &rcond,em)? {
+                                    panic!("Cannot merge new value")
+                                }
+                            }
+                        }
+                        update_activation(
+                            &acts,prog,prog_inp,&conds,instr_id.next(),em
+                        )?;
                     },
                     llvm_ir::InstructionC::Call(ref ret,_,ref ret_tp,ref called,ref args,_) => {
                         // Create the function type of the call
@@ -544,62 +526,56 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
                             &Some((ref t,_)) => Some(Box::new(t.clone())),
                             &None => None
                         },arg_tps,false);
-                        
                         // Update instruction activation
-                        let act_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(ActivationView::new());
-                        update_activation(&act_view,&mut nprog,&conds,
-                                          instr_id.next(),
-                                          &mut updates,
-                                          prog_inp.clone(),
-                                          em)?;
-
+                        update_activation(
+                            &acts,prog,prog_inp,&conds,instr_id.next(),em
+                        )?;
                         // Translate the called value
-                        let (rcalled,rcalled_inp) = translate_value(&m.datalayout,called,&ftp,&m.types,
-                                                                    call_frame,call_frame_inp.clone(),
-                                                                    exprs,em)?;
-                        let (base,base_inp) = match V::to_pointer(OptRef::Owned(rcalled),rcalled_inp) {
-                            None => panic!("Called value not a pointer"),
-                            Some(r) => r
-                        };
-                        let mut trgs = base.as_ref().chosen(base_inp.clone());
+                        let mut rcalled_inp = Vec::new();
+                        let rcalled = translate_value(
+                            &m.datalayout,called,&ftp,&m.types,
+                            &cf,prog,prog_inp,
+                            &mut rcalled_inp,em)?;
+                        let mut base_inp = Vec::new();
+                        let base = V::to_pointer(&Id::new(),
+                                                 &rcalled,&rcalled_inp[..],
+                                                 &mut base_inp,em)?
+                        .expect("Called value not a pointer");
+                        let mut trgs = Choice::choices(
+                            Id::new(),&base,&base_inp[..],em
+                        )?;
                         let cpos = conds.len();
-                        while let Some(trg_view) = trgs.next(&mut conds,cpos,em)? {
-                            let (trg,trg_inp) = trg_view.get_with_inp(base.as_ref(),base_inp.clone());
-                            match trg {
+                        while let Some(trg) = trgs.next(&mut conds,cpos,em)? {
+                            match trg.get(&base) {
                                 &(PointerTrg::Global(name),_) => {
-                                    let mut targs = Vec::with_capacity(args.len());
-                                    let mut targs_inp_ = Vec::with_capacity(args.len());
+                                    let mut targs_inp = Vec::new();
+                                    let mut targs = CompVec::with_capacity(
+                                        args.len(),&mut targs_inp,em)?;
+                                    let mut targ_inp = Vec::new();
                                     for arg in args.iter() {
-                                        let (targ,targ_inp) = translate_value(&m.datalayout,&arg.val,&arg.tp,&m.types,
-                                                                              call_frame,call_frame_inp.clone(),
-                                                                              exprs,em)?;
-                                        targs.push(targ);
-                                        targs_inp_.push(targ_inp);
+                                        targ_inp.clear();
+                                        let targ = translate_value(
+                                            &m.datalayout,&arg.val,&arg.tp,&m.types,
+                                            &cf,prog,prog_inp,
+                                            &mut targ_inp,em)?;
+                                        CompVec::push(&Id::new(),
+                                                      &mut targs,&mut targs_inp,
+                                                      targ,&mut targ_inp,em)?;
                                     }
-                                    let targs_inp = Transformation::concat(&targs_inp_[..]);
-                                    let ret_view = match ret {
+                                    let ret_path = match ret {
                                         &None => None,
-                                        &Some(ref rname) => Some(call_stack_view.clone()
-                                                                 .then(call_frame_view.clone())
-                                                                 .then(FstView::new())
-                                                                 .then(ValuesView::new())
-                                                                 .then(AssocView::new(rname)))
+                                        &Some(ref rname)
+                                            => Some((then(cf.clone(),
+                                                          ValuesPath),rname))
                                     };
                                     let cpos = conds.len();
                                     let implemented = lib.call(name,
-                                                               &targs,targs_inp,
-                                                               ret_view,
+                                                               &Id::new(),&targs,&targs_inp[..],
+                                                               ret_path,
                                                                &m.datalayout,
                                                                instr_id,
+                                                               prog,prog_inp,
                                                                &mut conds,
-                                                               &prog,
-                                                               prog_inp.clone(),
-                                                               &mut nprog,
-                                                               &mut updates,
-                                                               exprs,
                                                                em)?;
                                     cfg.change_instr_not_blocking(&mut conds,cpos,em)?;
                                     if !implemented {
@@ -612,168 +588,156 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
                                         let nxt_instr = InstructionRef { function: &cfun.name,
                                                                          basic_block: cblk,
                                                                          instruction: 0 };
-                                        let (vals,vals_inp) = assoc_empty()?;
-                                        let mut arg_vals = Vec::with_capacity(args.len());
-                                        let mut arg_vals_inp_ = Vec::with_capacity(args.len());
-                                        for arg in args.iter() {
-                                            let (rarg,rarg_inp) = translate_value(&m.datalayout,&arg.val,&arg.tp,
-                                                                                  &m.types,
-                                                                                  call_frame,
-                                                                                  call_frame_inp.clone(),
-                                                                                  exprs,em)?;
-                                            arg_vals.push(rarg);
-                                            arg_vals_inp_.push(rarg_inp);
-                                        }
-                                        let arg_vals_inp = Transformation::concat(&arg_vals_inp_[..]);
-                                        let (act0,act0_inp) = choice_empty();
-                                        let (act,act_inp) = choice_insert(OptRef::Owned(act0),act0_inp,
-                                                                          Transformation::const_bool(true,em)?,
-                                                                          OptRef::Owned(Data(nxt_instr)),
-                                                                          Transformation::id(0))?;
-                                        let (phi,phi_inp) = choice_empty();
-                                        let cf = CallFrame { values: vals.as_obj(),
-                                                             arguments: arg_vals,
-                                                             activation: act.as_obj(),
-                                                             phi: phi };
-                                            
-                                        let (prev_,prev_inp_) = choice_empty();
-                                        let (prev,prev_inp) = choice_insert(OptRef::Owned(prev_),prev_inp_,
-                                                                            Transformation::const_bool(true,em)?,
-                                                                            OptRef::Owned(Data(context_id.clone())),
-                                                                            Transformation::id(0))?;
-                                        let (allocs,allocs_inp) = assoc_empty()?;
-                                        let fr = Frame { previous: prev.as_obj(),
-                                                         allocations: allocs.as_obj() };
-                                        let cf_fr_inp = Transformation::concat(&[vals_inp,
-                                                                                 arg_vals_inp,
-                                                                                 act_inp,
-                                                                                 phi_inp,
-                                                                                 prev_inp,
-                                                                                 allocs_inp]);
+                                        let mut nframe_inp = Vec::new();
+                                        let nframe = tuple(
+                                            |res,em| CallFrame::construct(
+                                                Assoc::empty,
+                                                |res,em| CompVec::construct(
+                                                    args.iter(),
+                                                    |arg,res,em| translate_value(&m.datalayout,&arg.val,&arg.tp,
+                                                                                 &m.types,
+                                                                                 &cf,prog,&prog_inp[..],
+                                                                                 res,em),
+                                                    res,em),
+                                                |res,em| Choice::singleton(|_,_| Ok(Data(nxt_instr)),res,em),
+                                                Choice::empty,
+                                                res,em),
+                                            |res,em| Frame::construct(
+                                                |res,em| Choice::singleton(|_,_| Ok(context_id_p.get(prog).clone()),res,em),
+                                                Assoc::empty,
+                                                res,em),
+                                            &mut nframe_inp,em)?;
                                         // Insert the call frame
                                         let ncall_id = (Some(instr_id),name);
-                                        let ncall_stack_view = thread_view.clone()
-                                            .then(CallStackView::new())
-                                            .then(AssocView::new(ncall_id));
-                                        let (cur_cs_,cur_cs_inp)
-                                            = match ncall_stack_view.get_opt_with_inp(prog,prog_inp.clone()) {
-                                                None => {
-                                                    let (st,st_inp) = bv_vec_stack_empty(INDEX_WIDTH,em)?;
-                                                    (OptRef::Owned(st),st_inp)
-                                                },
-                                                Some((r,inp)) => (OptRef::Ref(r),inp)
-                                            };
-                                        let mut cur_cs = cur_cs_.as_obj();
-                                        let ncur_cs_inp = cur_cs.push_cond(cur_cs_inp,
-                                                                           (cf,fr),cf_fr_inp,
-                                                                           &mut conds,
-                                                                           exprs,em)?;
-                                        ncall_stack_view.insert(&mut nprog,cur_cs,ncur_cs_inp,&mut updates);
+                                        let (stack_exists,ncall_stack) = Assoc::lookup_or_insert(
+                                            then(thread.clone(),
+                                                 CallStackPath),
+                                            prog,prog_inp,ncall_id,
+                                            |res,em| BitVecVectorStack::singleton(INDEX_WIDTH,
+                                                                                  |res,em| {
+                                                                                      swap(res,&mut nframe_inp);
+                                                                                      Ok(nframe.clone())
+                                                                                  },res,em),
+                                            em)?;
+                                        BitVecVectorStack::push(&ncall_stack,prog,prog_inp,
+                                                                &mut conds,&nframe,&nframe_inp,
+                                                                em)?;
                                         // Update the stack top
-                                        let (rstack_top,rstack_top_inp,rcond) = if conds.len()==0 {
-                                            let c = em.const_bool(true)?;
-                                            let (st,st_inp) = choice_empty();
-                                            (OptRef::Owned(st),st_inp,Transformation::constant(vec![c]))
+                                        let stack_top = then(thread.clone(),
+                                                             StackTopPath);
+                                        let rcond = if conds.len()==0 {
+                                            em.const_bool(true)?
                                         } else {
-                                            let c = Transformation::and(conds.to_vec());
-                                            (OptRef::Ref(stack_top),stack_top_inp.clone(),c)
+                                            em.and(conds.clone())?
                                         };
-                                            let (nstack_top,nstack_top_inp)
-                                            = choice_set_chosen(rstack_top,rstack_top_inp.clone(),
-                                                                rcond,
-                                                                OptRef::Owned(Data(Some(ContextId::Call(ncall_id)))),
-                                                                Transformation::id(0))?;
-                                            stack_top_view.write(nstack_top.as_obj(),nstack_top_inp,
-                                                                 &mut nprog,&mut updates);
+                                        Choice::set_chosen(&stack_top,prog,prog_inp,
+                                                           Data(Some(ContextId::Call(ncall_id))),
+                                                           &mut Vec::new(),rcond,em)?;
                                     }
                                 },
-                                _ => panic!("Called object not a function")
+                                _ => unimplemented!()
                             }
                         }
                     },
                     llvm_ir::InstructionC::Unary(ref name,ref arg,ref op) => {
                         // Update instruction activation
-                        let act_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(ActivationView::new());
-                        update_activation(&act_view,&mut nprog,&conds,
-                                          instr_id.next(),
-                                          &mut updates,
-                                          prog_inp.clone(),
-                                          em)?;
-                        let value_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(ValuesView::new())
-                            .then(AssocView::new(name));
-                        let (rarg,rarg_inp) = translate_value(&m.datalayout,&arg.val,&arg.tp,&m.types,
-                                                              call_frame,call_frame_inp,
-                                                              exprs,em)?;
+                        update_activation(
+                            &acts,prog,prog_inp,&conds,instr_id.next(),em
+                        )?;
+                        let mut rarg_inp = Vec::new();
+                        let rarg = translate_value(&m.datalayout,&arg.val,&arg.tp,&m.types,
+                                                   &cf,prog,prog_inp,&mut rarg_inp,em)?;
                         match op {
                             &llvm_ir::UnaryInst::Cast(ref tp,ref op) => match op {
                                 &llvm_ir::CastInst::Bitcast => {
                                     // Pointer casts are ignored, just copy the argument
-                                    let (nval,nval_inp) = match value_view.get_opt_with_inp(&prog,prog_inp.clone()) {
-                                        None => (OptRef::Owned(rarg),rarg_inp),
-                                        Some((oval,oval_inp)) => {
-                                            let rcond = if conds.len()==0 {
-                                                let c = em.const_bool(true)?;
-                                                Transformation::constant(vec![c])
-                                            } else {
-                                                Transformation::and(conds.to_vec())
-                                            };
-                                            ite(OptRef::Owned(rarg),OptRef::Ref(oval),rcond,rarg_inp,oval_inp,em)?.unwrap()
-                                        }
+                                    let rcond = if conds.len()==0 {
+                                        em.const_bool(true)?
+                                    } else {
+                                        em.and(conds.clone())?
                                     };
-                                    value_view.insert(&mut nprog,nval.as_obj(),nval_inp,&mut updates);
+                                    Assoc::insert_cond(then(cf.clone(),
+                                                            ValuesPath),
+                                                       prog,prog_inp,name,rarg,&mut rarg_inp,
+                                                       &rcond,em)?;
                                 },
                                 &llvm_ir::CastInst::SExt => {
                                     let nsz = match tp {
                                         &llvm_ir::types::Type::Int(w) => w,
                                         _ => panic!("sext target not an int")
                                     };
-                                    let (nval,nval_inp) = V::sext(OptRef::Owned(rarg),rarg_inp,nsz as usize,em);
-                                    value_view.insert_cond(&mut nprog,
-                                                           nval.as_obj(),nval_inp,
-                                                           &conds,
-                                                           &mut updates,
-                                                           prog_inp.clone(),
-                                                           em)?;
+                                    let mut nval_inp = Vec::new();
+                                    let nval = V::sext(&Id::new(),&rarg,&rarg_inp[..],
+                                                       nsz as usize,&mut nval_inp,em)?;
+                                    let rcond = if conds.len()==0 {
+                                        em.const_bool(true)?
+                                    } else {
+                                        em.and(conds.clone())?
+                                    };
+                                    Assoc::insert_cond(then(cf.clone(),
+                                                            ValuesPath),
+                                                       prog,prog_inp,name,nval,&mut nval_inp,
+                                                       &rcond,em)?;
                                 },
                                 &llvm_ir::CastInst::ZExt => {
                                     let nsz = match tp {
                                         &llvm_ir::types::Type::Int(w) => w,
                                         _ => panic!("zext target not an int")
                                     };
-                                    let (nval,nval_inp) = V::zext(OptRef::Owned(rarg),rarg_inp,nsz as usize,em);
-                                    value_view.insert_cond(&mut nprog,
-                                                           nval.as_obj(),nval_inp,
-                                                           &conds,
-                                                           &mut updates,
-                                                           prog_inp.clone(),
-                                                           em)?;
+                                    let mut nval_inp = Vec::new();
+                                    let nval = V::zext(&Id::new(),&rarg,&rarg_inp[..],
+                                                       nsz as usize,&mut nval_inp,em)?;
+                                    let rcond = if conds.len()==0 {
+                                        em.const_bool(true)?
+                                    } else {
+                                        em.and(conds.clone())?
+                                    };
+                                    Assoc::insert_cond(then(cf.clone(),
+                                                            ValuesPath),
+                                                       prog,prog_inp,name,nval,&mut nval_inp,
+                                                       &rcond,em)?;
                                 },
                                 &llvm_ir::CastInst::Trunc => {
                                     let nsz = match tp {
                                         &llvm_ir::types::Type::Int(w) => w,
                                         _ => panic!("trunc target not an int")
                                     };
-                                    let (nval,nval_inp) = V::trunc(OptRef::Owned(rarg),rarg_inp,nsz as usize,em);
-                                    value_view.insert_cond(&mut nprog,
-                                                           nval.as_obj(),nval_inp,
-                                                           &conds,
-                                                           &mut updates,
-                                                           prog_inp.clone(),
-                                                           em)?;
+                                    let mut nval_inp = Vec::new();
+                                    let nval = V::trunc(&Id::new(),&rarg,&rarg_inp[..],
+                                                        nsz as usize,&mut nval_inp,em)?;
+                                    let rcond = if conds.len()==0 {
+                                        em.const_bool(true)?
+                                    } else {
+                                        em.and(conds.clone())?
+                                    };
+                                    Assoc::insert_cond(then(cf.clone(),
+                                                            ValuesPath),
+                                                       prog,prog_inp,name,nval,&mut nval_inp,
+                                                       &rcond,em)?;
                                 },
                                 &llvm_ir::CastInst::IntToPtr => {
-                                    value_view.insert_cond(&mut nprog,rarg,rarg_inp,&conds,
-                                                           &mut updates,prog_inp.clone(),em)?;
+                                    // Pointer casts are ignored, just copy the argument
+                                    let rcond = if conds.len()==0 {
+                                        em.const_bool(true)?
+                                    } else {
+                                        em.and(conds.clone())?
+                                    };
+                                    Assoc::insert_cond(then(cf.clone(),
+                                                            ValuesPath),
+                                                       prog,prog_inp,name,rarg,&mut rarg_inp,
+                                                       &rcond,em)?;
                                 },
                                 &llvm_ir::CastInst::PtrToInt => {
-                                    value_view.insert_cond(&mut nprog,rarg,rarg_inp,&conds,
-                                                           &mut updates,prog_inp.clone(),em)?;
+                                    // Pointer casts are ignored, just copy the argument
+                                    let rcond = if conds.len()==0 {
+                                        em.const_bool(true)?
+                                    } else {
+                                        em.and(conds.clone())?
+                                    };
+                                    Assoc::insert_cond(then(cf.clone(),
+                                                            ValuesPath),
+                                                       prog,prog_inp,name,rarg,&mut rarg_inp,
+                                                       &rcond,em)?;
                                 },
                                 _ => panic!("Unsupported cast: {:?}",op)
                             },
@@ -783,47 +747,35 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
                                         => (m.datalayout.type_size_in_bits(tp_,&m.types)/8) as usize,
                                     _ => panic!("Load argument not a pointer")
                                 };
-                                let value_view = call_stack_view.clone()
-                                    .then(call_frame_view.clone())
-                                    .then(FstView::new())
-                                    .then(ValuesView::new())
-                                    .then(AssocView::new(name));
-                                let (ptr,ptr_inp) = match V::to_pointer(
-                                    OptRef::Owned(rarg),
-                                    rarg_inp) {
-
+                                let mut ptr_inp = Vec::new();
+                                let ptr = match V::to_pointer(&Id::new(),&rarg,&rarg_inp[..],
+                                                              &mut ptr_inp,em)? {
                                     None => panic!("Load argument isn't a pointer"),
                                     Some(r) => r
                                 };
-                                //println!("LOAD from {:#?}",ptr.as_ref());
-                                let mut ptr_iter = ptr.as_ref().chosen(ptr_inp.clone());
+                                let mut bases = Choice::choices(Id::new(),&ptr,&ptr_inp[..],em)?;
                                 let cpos = conds.len();
-                                while let Some(base_view) = ptr_iter.next(&mut conds,cpos,em)? {
-                                    let (trg_off,trg_off_inp)
-                                        = base_view.get_with_inp(ptr.as_ref(),
-                                                                 ptr_inp.clone());
-                                    let &(ref trg,ref off) = trg_off;
-                                    //println!("TARGET {:#?}",trg);
-                                    let trg_sz = trg.num_elem();
-                                    let trg_inp = Transformation::view(0,trg_sz,trg_off_inp.clone());
-                                    let off_inp = Transformation::view(trg_sz,trg_off_inp.size()-trg_sz,trg_off_inp);
-                                    let mut lookup_iter : MemLookups<V,Em>
-                                        = MemLookups::new(trg,
-                                                          trg_inp,
-                                                          &prog,
-                                                          exprs,
-                                                          em)?;
+                                while let Some(base) = bases.next(&mut conds,cpos,em)? {
+                                    let trg = then(base.clone(),
+                                                   Element1Of2);
+                                    let off = then(base,Element2Of2);
+                                    let mut lookups = MemLookups::new(&trg,&ptr,&ptr_inp[..],prog,prog_inp,em)?;
                                     let cpos = conds.len();
-                                    while let Some(lookup) = lookup_iter.next(&mut conds,cpos,em)? {
-                                        let (load,load_inp) = lookup.load(&m.datalayout,
-                                                                          off,off_inp.clone(),
-                                                                          sz,prog,prog_inp.clone(),em)?;
-                                        value_view.insert_cond(&mut nprog,
-                                                               load.as_obj(),load_inp,
-                                                               &conds,
-                                                               &mut updates,
-                                                               prog_inp.clone(),
-                                                               em)?;
+                                    while let Some(lookup) = lookups.next(&mut conds,cpos,prog,prog_inp,em)? {
+                                        let mut load_inp = Vec::new();
+                                        let load = lookup.load(
+                                            &m.datalayout,
+                                            &off,&ptr,&ptr_inp[..],
+                                            sz,prog,prog_inp,
+                                            &mut load_inp,em)?;
+                                        let rcond = if conds.len()==0 {
+                                            em.const_bool(true)?
+                                        } else {
+                                            em.and(conds.clone())?
+                                        };
+                                        Assoc::insert_cond(then(cf.clone(),ValuesPath),
+                                                           prog,prog_inp,name,load,&mut load_inp,
+                                                           &rcond,em)?;
                                     }
                                 }
                             }
@@ -831,67 +783,55 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
                     },
                     llvm_ir::InstructionC::Select(ref name,ref sel,ref tp,ref if_t,ref if_f) => {
                         // Update instruction activation
-                        let act_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(ActivationView::new());
-                        update_activation(&act_view,&mut nprog,&conds,
-                                          instr_id.next(),
-                                          &mut updates,
-                                          prog_inp.clone(),
-                                          em)?;
+                        update_activation(
+                            &acts,prog,prog_inp,&conds,instr_id.next(),em
+                        )?;
                         let sel_tp = llvm_ir::types::Type::Int(1);
-                        let (rsel,rsel_inp) = translate_value(&m.datalayout,sel,&sel_tp,&m.types,
-                                                              call_frame,call_frame_inp.clone(),
-                                                              exprs,em)?;
-                        let cond = V::to_bool(OptRef::Owned(rsel),rsel_inp)?;
-                        let (rif_t,rif_t_inp) = translate_value(&m.datalayout,if_t,tp,&m.types,
-                                                                call_frame,call_frame_inp.clone(),
-                                                                exprs,em)?;
-                        let (rif_f,rif_f_inp) = translate_value(&m.datalayout,if_f,tp,&m.types,
-                                                                call_frame,call_frame_inp,
-                                                                exprs,em)?;
-                        let (res,res_inp) = ite(OptRef::Owned(rif_t),
-                                                OptRef::Owned(rif_f),
-                                                cond,
-                                                rif_t_inp,
-                                                rif_f_inp,em)?.unwrap();
+                        let mut rsel_inp = Vec::new();
+                        let rsel = translate_value(&m.datalayout,sel,&sel_tp,&m.types,
+                                                   &cf,prog,prog_inp,&mut rsel_inp,em)?;
+                        let cond = V::to_bool(&Id,&rsel,&rsel_inp[..],em)?;
+                        let mut rif_t_inp = Vec::new();
+                        let rif_t = translate_value(&m.datalayout,if_t,tp,&m.types,
+                                                    &cf,prog,prog_inp,&mut rif_t_inp,em)?;
+                        let mut rif_f_inp = Vec::new();
+                        let rif_f = translate_value(&m.datalayout,if_f,tp,&m.types,
+                                                    &cf,prog,prog_inp,&mut rif_f_inp,em)?;
+                        let mut res_inp = Vec::new();
+                        let res = ite(&cond,
+                                      &Id,&rif_t,&rif_t_inp[..],
+                                      &Id,&rif_f,&rif_f_inp[..],
+                                      &mut res_inp,em)?.expect("Cannot merge for select");
                         // Insert the result
-                        let value_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(ValuesView::new())
-                            .then(AssocView::new(name));
-                        value_view.insert_cond(&mut nprog,
-                                               res.as_obj(),res_inp,
-                                               &conds,
-                                               &mut updates,
-                                               prog_inp.clone(),
-                                               em)?;
+                        let rcond = if conds.len()==0 {
+                            em.const_bool(true)?
+                        } else {
+                            em.and(conds.clone())?
+                        };
+                        Assoc::insert_cond(then(cf.clone(),
+                                                ValuesPath),
+                                           prog,prog_inp,name,res,&mut res_inp,
+                                           &rcond,em)?;
                     },
                     llvm_ir::InstructionC::GEP(ref name,llvm_ir::GEP {
                         ref ptr,ref indices,..
                     }) => {
                         // Update instruction activation
-                        let act_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(ActivationView::new());
-                        update_activation(&act_view,&mut nprog,&conds,
-                                          instr_id.next(),
-                                          &mut updates,
-                                          prog_inp.clone(),
-                                          em)?;
+                        update_activation(
+                            &acts,prog,prog_inp,&conds,instr_id.next(),em
+                        )?;
                         // Calculate the GEP
-                        let (rptr,rptr_inp) = translate_value(
+                        let mut rptr_inp = Vec::new();
+                        let rptr = translate_value(
                             &m.datalayout,&ptr.val,&ptr.tp,&m.types,
-                            call_frame,call_frame_inp.clone(),
-                            exprs,em)?;
+                            &cf,prog,prog_inp,&mut rptr_inp,em)?;
                         let bw = rptr.byte_width();
-                        let (base,base_inp) = V::to_pointer(
-                            OptRef::Owned(rptr),
-                            rptr_inp).unwrap();
-                        let mut idx = Vec::with_capacity(indices.len());
+                        let mut base_inp = Vec::new();
+                        let mut base = V::to_pointer(&Id,&rptr,&rptr_inp[..],
+                                                     &mut base_inp,em)?
+                        .expect("GEP base not a pointer");
+                        let mut idx_inp = Vec::new();
+                        let mut idx = CompVec::with_capacity(indices.len(),&mut idx_inp,em)?;
                         let mut cur_tp = &ptr.tp;
                         for &(ref el,_) in indices.iter() {
                             cur_tp = match resolve_tp(cur_tp,&m.types) {
@@ -905,7 +845,9 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
                                                 .type_size_in_bits(sub_tp,
                                                                    &m.types)/8;
                                         }
-                                        idx.push((None,coff as usize));
+                                        CompVec::push(&Id,&mut idx,&mut idx_inp,
+                                                      (None,Data(coff as usize)),
+                                                      &mut Vec::new(),em)?;
                                         &sub_tps[rc];
                                         break
                                     },
@@ -914,212 +856,183 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
                                 &Type::Pointer(ref ptr_tp,_) => {
                                     let sz = m.datalayout.type_size_in_bits(
                                         ptr_tp,&m.types)/8;
-                                    let (i,i_inp) = translate_value(
+                                    let mut i_inp = Vec::new();
+                                    let i = translate_value(
                                         &m.datalayout,
                                         &el.val,&el.tp,
                                         &m.types,
-                                        call_frame,call_frame_inp.clone(),
-                                        exprs,em)?;
-                                    let (off,off_inp) = V::to_offset(OptRef::Owned(i),i_inp);
-                                    let off_e = off_inp.get(exprs,0,em)?;
+                                        &cf,prog,prog_inp,
+                                        &mut i_inp,em)?;
+                                    let mut off_inp = Vec::new();
+                                    let off = V::to_offset(&Id,&i,&i_inp[..],&mut off_inp,em)?;
+                                    let off_e = Singleton::get(&Id,&off,&off_inp[..],em)?;
                                     match em.derive_const(&off_e)? {
                                         None => panic!("Dynamic GEP"),//idx.push((Some((off,off_inp)),sz as usize)),
-                                        Some(off_c) => idx.push((None,value_as_index(&off_c)*(sz as usize)))
+                                        Some(off_c) => CompVec::push(&Id,&mut idx,&mut idx_inp,
+                                                                     (None,Data(value_as_index(&off_c)*(sz as usize))),
+                                                                     &mut Vec::new(),em)?
                                     };
                                     ptr_tp
                                 },
                                 &Type::Array(_,ref el_tp) => {
                                     let sz = m.datalayout.type_size_in_bits(
                                         el_tp,&m.types)/8;
-                                    let (i,i_inp) = translate_value(
+                                    let mut i_inp = Vec::new();
+                                    let i = translate_value(
                                         &m.datalayout,
                                         &el.val,&el.tp,
                                         &m.types,
-                                        call_frame,call_frame_inp.clone(),
-                                        exprs,em)?;
-                                    let (off,off_inp) = V::to_offset(OptRef::Owned(i),i_inp);
-                                    let off_e = off_inp.get(exprs,0,em)?;
+                                        &cf,prog,prog_inp,
+                                        &mut i_inp,em)?;
+                                    let mut off_inp = Vec::new();
+                                    let off = V::to_offset(&Id,&i,&i_inp[..],&mut off_inp,em)?;
+                                    let off_e = Singleton::get(&Id,&off,&off_inp[..],em)?;
                                     match em.derive_const(&off_e)? {
-                                        None => idx.push((Some((off,off_inp)),sz as usize)),
-                                        Some(off_c) => idx.push((None,value_as_index(&off_c)*(sz as usize)))
+                                        None => CompVec::push(&Id,&mut idx,&mut idx_inp,
+                                                              (Some(off),Data(sz as usize)),
+                                                              &mut off_inp,em)?,
+                                        Some(off_c) => CompVec::push(&Id,&mut idx,&mut idx_inp,
+                                                                     (None,Data(value_as_index(&off_c)*(sz as usize))),
+                                                                     &mut Vec::new(),em)?
                                     };
                                     el_tp
                                 },
                                 _ => panic!("GEP for {:?}",cur_tp)
                             };
                         }
-                        let (nbase,nbase_inp) = base_pointer_gep(
-                            base,base_inp,idx,em)?;
-                        let (nptr,nptr_inp) = V::from_pointer(bw,nbase,
-                                                              nbase_inp);
+                        base_pointer_gep(
+                            Id,&mut base,&mut base_inp,
+                            &Id,&idx,&idx_inp[..],em)?;
+                        let mut nptr_inp = Vec::new();
+                        let nptr = V::from_pointer(
+                            bw,&Id,&base,&base_inp[..],
+                            &mut nptr_inp,em)?;
                         // Write the pointer
-                        let value_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(ValuesView::new())
-                            .then(AssocView::new(name));
-                        value_view.insert_cond(&mut nprog,
-                                               nptr.as_obj(),nptr_inp,
-                                               &conds,
-                                               &mut updates,
-                                               prog_inp.clone(),
-                                               em)?;
+                        let rcond = if conds.len()==0 {
+                            em.const_bool(true)?
+                        } else {
+                            em.and(conds.clone())?
+                        };
+                        Assoc::insert_cond(then(cf.clone(),
+                                                ValuesPath),
+                                           prog,prog_inp,name,nptr,&mut nptr_inp,
+                                           &rcond,em)?;
                     },
                     llvm_ir::InstructionC::Store(_,ref val,ref ptr,_) => {
                         // Update instruction activation
-                        let act_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(ActivationView::new());
-                        update_activation(&act_view,&mut nprog,&conds,
-                                          instr_id.next(),
-                                          &mut updates,
-                                          prog_inp.clone(),
-                                          em)?;
-                        let (rptr_,rptr_inp_) = translate_value(&m.datalayout,&ptr.val,&ptr.tp,
-                                                                &m.types,
-                                                                call_frame,
-                                                                call_frame_inp.clone(),
-                                                                exprs,em)?;
-                        let (rptr,rptr_inp) = match V::to_pointer(
-                            OptRef::Owned(rptr_),
-                            rptr_inp_) {
+                        update_activation(
+                            &acts,prog,prog_inp,&conds,instr_id.next(),em
+                        )?;
+                        let mut rptr_inp_ = Vec::new();
+                        let rptr_ = translate_value(&m.datalayout,&ptr.val,&ptr.tp,
+                                                    &m.types,
+                                                    &cf,prog,prog_inp,
+                                                    &mut rptr_inp_,em)?;
+                        let mut rptr_inp = Vec::new();
+                        let rptr = match V::to_pointer(
+                            &Id,&rptr_,&rptr_inp_[..],&mut rptr_inp,em)? {
                             None => panic!("Store target isn't a pointer"),
                             Some(r) => r
                         };
-                        /*println!("STORE to {:?}, {:?}, {:?}",rptr.as_ref(),rptr_inp,
-                                 rptr_inp.get_all(exprs,em)?.iter().map(|e| match em.derive_values(e).unwrap() {
-                                     None => vec![],
-                                     Some(v) => v.collect::<Vec<_>>()
-                                 }).collect::<Vec<_>>() );*/
-                        let (rval,rval_inp) = translate_value(&m.datalayout,&val.val,&val.tp,
-                                                              &m.types,
-                                                              call_frame,
-                                                              call_frame_inp.clone(),
-                                                              exprs,em)?;
-                        let mut ptr_iter = rptr.as_ref().chosen(rptr_inp.clone());
+                        let mut rval_inp = Vec::new();
+                        let rval = translate_value(&m.datalayout,&val.val,&val.tp,
+                                                   &m.types,
+                                                   &cf,prog,prog_inp,
+                                                   &mut rval_inp,em)?;
+
+                        let mut bases = Choice::choices(Id,&rptr,&rptr_inp[..],em)?;
                         let cpos = conds.len();
-                        while let Some(base_view) = ptr_iter.next(&mut conds,cpos,em)? {
-                            let (trg_off,trg_off_inp)
-                                = base_view.get_with_inp(rptr.as_ref(),
-                                                         rptr_inp.clone());
-                            //println!("STORE TRG {:?}",trg_off_inp);
-                            let &(ref trg,ref off) = trg_off;
-                            let trg_sz = trg.num_elem();
-                            let trg_inp = Transformation::view(0,trg_sz,trg_off_inp.clone());
-                            let off_inp = Transformation::view(trg_sz,trg_off_inp.size()-trg_sz,trg_off_inp);
-                            let mut lookup_iter : MemLookups<V,Em>
-                                = MemLookups::new(trg,
-                                                  trg_inp,
-                                                  &prog,
-                                                  exprs,
-                                                  em)?;
+                        while let Some(base) = bases.next(&mut conds,cpos,em)? {
+                            let trg = then(base.clone(),
+                                           Element1Of2);
+                            let off = then(base,Element2Of2);
+                            let mut lookups = MemLookups::new(&trg,&rptr,
+                                                              &rptr_inp[..],
+                                                              prog,prog_inp,em)?;
                             let cpos = conds.len();
-                            while let Some(lookup) = lookup_iter.next(&mut conds,cpos,em)? {
+                            while let Some(lookup) = lookups.next(&mut conds,cpos,prog,prog_inp,em)? {
                                 //println!("STORE LOOKUP");
-                                if conds.len()==0 {
-                                    lookup.store(off,off_inp.clone(),&rval,rval_inp.clone(),
-                                                 &mut nprog,&mut updates,
-                                                 prog_inp.clone(),em)?;
+                                let rcond = if conds.len()==0 {
+                                    None
                                 } else {
-                                    let bw = rval.byte_width();
-                                    let rcond = Transformation::and(conds.clone());
-                                    let (pval,pval_inp) = lookup.load(&m.datalayout,
-                                                                      off,off_inp.clone(),bw,
-                                                                      &prog,prog_inp.clone(),
-                                                                      em)?;
-                                    let (nval,nval_inp) = ite(OptRef::Ref(&rval),
-                                                              pval,
-                                                              rcond,
-                                                              rval_inp.clone(),
-                                                              pval_inp,em)?.unwrap();
-                                    lookup.store(off,off_inp.clone(),nval.as_ref(),nval_inp,
-                                                 &mut nprog,&mut updates,
-                                                 prog_inp.clone(),em)?;
-                                }
+                                    Some(em.and(conds.clone())?)
+                                };
+                                lookup.store(&off,&rptr,&rptr_inp[..],
+                                             rval.clone(),&mut rval_inp.clone(),
+                                             prog,prog_inp,rcond,em)?;
                             }
                         }
                     },
                     llvm_ir::InstructionC::Bin(ref name,ref op,ref tp,ref lhs,ref rhs) => {
                         // Update instruction activation
-                        let act_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(ActivationView::new());
-                        update_activation(&act_view,&mut nprog,&conds,
-                                          instr_id.next(),
-                                          &mut updates,
-                                          prog_inp.clone(),
-                                          em)?;
-                        let (val_l,val_l_inp) = translate_value(&m.datalayout,
-                                                                lhs,tp,
-                                                                &m.types,
-                                                                call_frame,
-                                                                call_frame_inp.clone(),
-                                                                exprs,em)?;
-                        let (val_r,val_r_inp) = translate_value(&m.datalayout,
-                                                                rhs,tp,
-                                                                &m.types,
-                                                                call_frame,
-                                                                call_frame_inp.clone(),
-                                                                exprs,em)?;
-                        let (res,res_inp) = V::bin(op,
-                                                   &val_l,
-                                                   &val_r,
-                                                   val_l_inp,val_r_inp,
-                                                   exprs,
-                                                   em)?;
-                        let value_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(ValuesView::new())
-                            .then(AssocView::new(name));
-                        value_view.insert_cond(&mut nprog,
-                                               res,res_inp,
-                                               &conds,
-                                               &mut updates,
-                                               prog_inp.clone(),
-                                               em)?;
+                        update_activation(
+                            &acts,prog,prog_inp,&conds,instr_id.next(),em
+                        )?;
+                        let mut val_l_inp = Vec::new();
+                        let val_l = translate_value(&m.datalayout,
+                                                    lhs,tp,
+                                                    &m.types,
+                                                    &cf,prog,prog_inp,
+                                                    &mut val_l_inp,em)?;
+                        let mut val_r_inp = Vec::new();
+                        let val_r = translate_value(&m.datalayout,
+                                                    rhs,tp,
+                                                    &m.types,
+                                                    &cf,prog,prog_inp,
+                                                    &mut val_r_inp,em)?;
+                        let mut res_inp = Vec::new();
+                        let res = V::bin(op,
+                                         &Id,&val_l,&val_l_inp[..],
+                                         &Id,&val_r,&val_r_inp[..],
+                                         &mut res_inp,em)?;
+                        let rcond = if conds.len()==0 {
+                            em.const_bool(true)?
+                        } else {
+                            em.and(conds.clone())?
+                        };
+                        Assoc::insert_cond(then(cf.clone(),
+                                                ValuesPath),
+                                           prog,prog_inp,name,res,&mut res_inp,
+                                           &rcond,em)?;
                     },
                     llvm_ir::InstructionC::Term(llvm_ir::Terminator::Ret(ref retv)) => {
+                        let mut rret_inp = Vec::new();
                         let rret = match retv {
                             &None => None,
                             &Some(ref r) => Some(translate_value(&m.datalayout,
                                                                  &r.val,&r.tp,
                                                                  &m.types,
-                                                                 call_frame,
-                                                                 call_frame_inp.clone(),
-                                                                 exprs,em)?)
+                                                                 &cf,prog,prog_inp,
+                                                                 &mut rret_inp,em)?)
                         };
                         match fr_id {
                             None => {
-                                let prev_view = call_frame_view.clone()
-                                    .then(SndView::new())
-                                    .then(PrevFrameView::new());
-                                let (prev,prev_inp) = prev_view.get_with_inp(&call_stack,call_stack_inp.clone());
-                                let mut prev_it = prev.chosen(prev_inp.clone());
+                                let prev = then(then(call_frame.clone(),
+                                                     Element2Of2),
+                                                PrevFramePath);
+                                let mut prev_it = Choice::choices(
+                                    prev,prog,&prog_inp[..],em)?;
                                 match rret {
                                     None => {},
-                                    Some((ret,ret_inp)) => {
+                                    Some(ret) => {
                                         let cpos = conds.len();
-                                        while let Some(ctx_view) = prev_it.next(&mut conds,cpos,em)? {
-                                            let ctx = ctx_view.get_el(&prev);
-                                            match ctx.0 {
+                                        while let Some(ctx) = prev_it.next(&mut conds,cpos,em)? {
+                                            match ctx.get(prog).0.clone() {
                                                 None => {
                                                     panic!("Handle thread return")
                                                 },
-                                                Some(ref ctx_) => {
+                                                Some(ctx_) => {
                                                     let pcall = match ctx_ {
-                                                        &ContextId::Call(c) => c,
-                                                        &ContextId::Stack(c,_) => c
+                                                        ContextId::Call(c) => c,
+                                                        ContextId::Stack(c,_) => c
                                                     };
-                                                    let pstack_view = thread_view.clone()
-                                                        .then(CallStackView::new())
-                                                        .then(AssocView::new(pcall));
-                                                    let (pstack,pstack_inp) = pstack_view.get_with_inp(prog,prog_inp.clone());
-                                                    let mut pstack_it = pstack.access_top(pstack_inp,exprs,em)?;
+                                                    let pstack = Assoc::lookup(then(thread.clone(),
+                                                                                    CallStackPath),
+                                                                               prog,&pcall)
+                                                        .expect("Call stack not found");
+                                                    let mut pstack_it = BitVecVectorStack::top(pstack,prog,&prog_inp[..],em)?;
                                                     let cpos = conds.len();
-                                                    while let Some(pcf_view) = pstack_it.next(&mut conds,cpos,em)? {
+                                                    while let Some(pcf) = pstack_it.next(&mut conds,cpos,em)? {
                                                         let ret_instr = match cf_id.0 {
                                                             Some(i) => {
                                                                 let instr = i.resolve(m);
@@ -1130,79 +1043,61 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
                                                             },
                                                             None => panic!("No return instruction available")
                                                         };
-                                                        let ret_val_view = pstack_view.clone()
-                                                            .then(pcf_view)
-                                                            .then(FstView::new())
-                                                            .then(ValuesView::new())
-                                                            .then(AssocView::new(ret_instr));
-                                                        ret_val_view.insert_cond(&mut nprog,
-                                                                                 ret.clone(),ret_inp.clone(),
-                                                                                 &conds,
-                                                                                 &mut updates,
-                                                                                 prog_inp.clone(),
-                                                                                 em)?
+                                                        let ret_vals = then(then(pcf,Element1Of2),
+                                                                            ValuesPath);
+                                                        let rcond = if conds.len()==0 {
+                                                            em.const_bool(true)?
+                                                        } else {
+                                                            em.and(conds.clone())?
+                                                        };
+                                                        Assoc::insert_cond(ret_vals,prog,prog_inp,
+                                                                           ret_instr,
+                                                                           ret.clone(),&mut rret_inp.clone(),
+                                                                           &rcond,em)?;
                                                     }
                                                 }
                                             }
                                         }
                                     }
                                 };
-                                stack_top_view.write_cond(prev.clone(),
-                                                          prev_inp,
-                                                          &mut nprog,
-                                                          &conds,
-                                                          &mut updates,
-                                                          prog_inp.clone(),
-                                                          em)?;
-                                let (ncall_stack,ncall_stack_inp)
-                                    = bv_vec_stack_pop(OptRef::Ref(call_stack),call_stack_inp.clone(),exprs,em)?.unwrap();
-                                call_stack_view.write_cond(ncall_stack.as_obj(),
-                                                           ncall_stack_inp,
-                                                           &mut nprog,
-                                                           &conds,
-                                                           &mut updates,
-                                                           prog_inp.clone(),
-                                                           em)?;
+                                BitVecVectorStack::pop(&call_stack,
+                                                       prog,prog_inp,
+                                                       &conds,em)?;
                             },
                             Some(_) => unimplemented!()
                         }
                     },
                     llvm_ir::InstructionC::ICmp(ref name,ref op,ref tp,ref lhs,ref rhs) => {
                         // Update instruction activation
-                        let act_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(ActivationView::new());
-                        update_activation(&act_view,&mut nprog,&conds,
-                                          instr_id.next(),
-                                          &mut updates,
-                                          prog_inp.clone(),
-                                          em)?;
-                        let (vl,vl_inp) = translate_value(&m.datalayout,
-                                                          lhs,tp,
-                                                          &m.types,
-                                                          call_frame,call_frame_inp.clone(),
-                                                          exprs,em)?;
-                        let (vr,vr_inp) = translate_value(&m.datalayout,
-                                                          rhs,tp,
-                                                          &m.types,
-                                                          call_frame,call_frame_inp.clone(),
-                                                          exprs,em)?;
+                        update_activation(
+                            &acts,prog,prog_inp,&conds,instr_id.next(),em
+                        )?;
+                        let mut vl_inp = Vec::new();
+                        let vl = translate_value(&m.datalayout,
+                                                 lhs,tp,
+                                                 &m.types,
+                                                 &cf,prog,prog_inp,
+                                                 &mut vl_inp,em)?;
+                        let mut vr_inp = Vec::new();
+                        let vr = translate_value(&m.datalayout,
+                                                 rhs,tp,
+                                                 &m.types,
+                                                 &cf,prog,prog_inp,
+                                                 &mut vr_inp,em)?;
                         let cond = V::icmp(op,
-                                           &vl,vl_inp,
-                                           &vr,vr_inp,em)?;
-                        let (ret,ret_inp) = V::from_bool(cond)?;
-                        let value_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(ValuesView::new())
-                            .then(AssocView::new(name));
-                        value_view.insert_cond(&mut nprog,
-                                               ret,ret_inp,
-                                               &conds,
-                                               &mut updates,
-                                               prog_inp.clone(),
-                                               em)?;
+                                           &Id,&vl,&vl_inp[..],
+                                           &Id,&vr,&vr_inp[..],em)?;
+                        let mut ret_inp = Vec::new();
+                        let ret = V::from_bool(cond,&mut ret_inp,em)?;
+                        let rcond = if conds.len()==0 {
+                            em.const_bool(true)?
+                        } else {
+                            em.and(conds.clone())?
+                        };
+                        Assoc::insert_cond(then(cf.clone(),
+                                                ValuesPath),
+                                           prog,prog_inp,name,ret,&mut ret_inp,
+                                           &rcond,em)?;
                     },
                     llvm_ir::InstructionC::Term(llvm_ir::Terminator::BrC(ref cond,ref trgT,ref trgF)) => {
                         let instrT = InstructionRef { function: instr_id.function,
@@ -1213,198 +1108,180 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
                                                       instruction: 0 };
                         
                         let tp = llvm_ir::types::Type::Int(1);
-                        let (rcond,rcond_inp) = translate_value(&m.datalayout,
-                                                                cond,&tp,
-                                                                &m.types,
-                                                                call_frame,call_frame_inp.clone(),
-                                                                exprs,em)?;
-                        let bcond = V::to_bool(OptRef::Owned(rcond),rcond_inp)?;
-                        let ncond = Transformation::not(bcond.clone());
-                        let (ch0,ch0_inp) = choice_empty();
-                        let (ch1,ch1_inp) = choice_insert(OptRef::Owned(ch0),ch0_inp,
-                                                          bcond.clone(),
-                                                          OptRef::Owned(Data(instrT)),Transformation::id(0))?;
-                        let (ch2,ch2_inp) = choice_insert(ch1,ch1_inp,
-                                                          ncond.clone(),
-                                                          OptRef::Owned(Data(instrF)),Transformation::id(0))?;
-                        let act_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(ActivationView::new());
-                        act_view.write_cond(ch2.as_obj(),ch2_inp,
-                                            &mut nprog,&mut conds,&mut updates,prog_inp.clone(),em)?;
-                        
+                        let mut rcond_inp = Vec::new();
+                        let rcond = translate_value(&m.datalayout,
+                                                    cond,&tp,
+                                                    &m.types,
+                                                    &cf,prog,prog_inp,
+                                                    &mut rcond_inp,em)?;
+                        let bcond = V::to_bool(&Id,&rcond,&rcond_inp[..],em)?;
+                        let mut ch_inp = Vec::new();
+                        let mut ch = Choice::empty(&mut ch_inp,em)?;
+                        Choice::insert(&Id,&mut ch,&mut ch_inp,
+                                       Data(instrT),&mut Vec::new(),
+                                       bcond.clone(),em)?;
+                        let nbcond = em.not(bcond.clone())?;
+                        Choice::insert(&Id,&mut ch,&mut ch_inp,
+                                       Data(instrF),&mut Vec::new(),
+                                       nbcond.clone(),em)?;
+                        if conds.len() == 0 {
+                            acts.set(prog,prog_inp,ch,&mut ch_inp,em)?;
+                        } else {
+                            let ccond = em.and(conds.clone())?;
+                            if !acts.set_cond(prog,prog_inp,ch,&mut ch_inp,&ccond,em)? {
+                                panic!("Failed to set activation")
+                            }
+                        }                        
                         // Evaluate phis
+                        let phi = then(cf.clone(),
+                                       PhiPath);
+                        let mut nphi_inp = Vec::new();
+                        let mut nphi = Choice::empty(&mut nphi_inp,em)?;
 
-                        let phi_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(PhiView::new());
-                        let (phi0,phi_inp0) = choice_empty();
-                        let (phi1,phi_inp1) = choice_insert(OptRef::Owned(phi0),
-                                                            phi_inp0,
-                                                            bcond,
-                                                            OptRef::Owned(Data((instr_id.basic_block,trgT))),
-                                                            Transformation::id(0))?;
-                        let (phi2,phi_inp2) = choice_insert(phi1,
-                                                            phi_inp1,
-                                                            ncond,
-                                                            OptRef::Owned(Data((instr_id.basic_block,trgF))),
-                                                            Transformation::id(0))?;
-                        phi_view.write_cond(phi2.as_obj(),phi_inp2,
-                                            &mut nprog,
-                                            &conds,
-                                            &mut updates,prog_inp.clone(),em)?;
-                        /*
-                        let values_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(ValuesView::new());
-                        conds.push(bcond);
-                        eval_phi(m,instr_id.function,instr_id.basic_block,trgT,&values_view,
-                                 &call_frame,call_frame_inp.clone(),
-                                 &conds,&mut nprog,&mut updates,prog_inp.clone(),
-                                 exprs,em)?;
-                        conds.pop();
-                        conds.push(ncond);
-                        eval_phi(m,instr_id.function,instr_id.basic_block,trgF,&values_view,
-                                 &call_frame,call_frame_inp.clone(),
-                                 &conds,&mut nprog,&mut updates,prog_inp.clone(),
-                                 exprs,em)?;
-                        conds.pop();*/
+                        Choice::insert(&Id,&mut nphi,&mut nphi_inp,
+                                       Data((instr_id.basic_block,trgT)),
+                                       &mut Vec::new(),bcond.clone(),em)?;
+                        Choice::insert(&Id,&mut nphi,&mut nphi_inp,
+                                       Data((instr_id.basic_block,trgF)),
+                                       &mut Vec::new(),nbcond.clone(),em)?;
+                        if conds.len()==0 {
+                            phi.set(prog,prog_inp,nphi,&mut nphi_inp,em)?;
+                        } else {
+                            let ccond = em.and(conds.clone())?;
+                            if !phi.set_cond(prog,prog_inp,nphi,&mut nphi_inp,&ccond,em)? {
+                                panic!("Failed to set phi")
+                            }
+                        }
                     },
                     llvm_ir::InstructionC::Term(llvm_ir::Terminator::Br(ref trg)) => {
                         let instr_next = InstructionRef { function: instr_id.function,
                                                           basic_block: trg,
                                                           instruction: 0 };
                         // Update instruction activation
-                        let act_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(ActivationView::new());
-                        update_activation(&act_view,&mut nprog,&conds,
-                                          instr_next,
-                                          &mut updates,
-                                          prog_inp.clone(),
-                                          em)?;
+                        update_activation(&acts,prog,prog_inp,
+                                          &conds,instr_next,em)?;
                         // Evaluate phis
-                        let phi_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(PhiView::new());
-                        let (phi0,phi_inp0) = choice_empty();
-                        let (phi1,phi_inp1) = choice_insert(OptRef::Owned(phi0),
-                                                            phi_inp0,
-                                                            Transformation::const_bool(true,em)?,
-                                                            OptRef::Owned(Data((instr_id.basic_block,trg))),
-                                                            Transformation::id(0))?;
-                        phi_view.write_cond(phi1.as_obj(),phi_inp1,
-                                            &mut nprog,
-                                            &conds,
-                                            &mut updates,prog_inp.clone(),em)?;
-                        /*
-                        let values_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(ValuesView::new());
-                        eval_phi(m,instr_id.function,instr_id.basic_block,trg,&values_view,
-                                 &call_frame,call_frame_inp,
-                                 &conds,&mut nprog,&mut updates,prog_inp.clone(),
-                                 exprs,em)?;*/
+                        let phi = then(cf.clone(),
+                                       PhiPath);
+
+                        let mut nphi_inp = Vec::new();
+                        let nphi = Choice::singleton(
+                            |_,_| Ok(Data((instr_id.basic_block,trg))),
+                            &mut nphi_inp,em)?;
+
+                        if conds.len()==0 {
+                            phi.set(prog,prog_inp,nphi,&mut nphi_inp,em)?;
+                        } else {
+                            let ccond = em.and(conds.clone())?;
+                            if !phi.set_cond(prog,prog_inp,nphi,&mut nphi_inp,&ccond,em)? {
+                                panic!("Failed to set phi")
+                            }
+                        }
                     },
                     llvm_ir::InstructionC::Phi(ref name,ref tp,ref srcs) => {
                         // Update instruction activation
-                        let act_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(ActivationView::new());
-                        update_activation(&act_view,&mut nprog,&conds,
-                                          instr_id.next(),
-                                          &mut updates,
-                                          prog_inp.clone(),
-                                          em)?;
-                        // Update value
-                        let phi_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(PhiView::new());
-                        let (phi,phi_inp) = phi_view.get_with_inp(&prog,prog_inp.clone());
-                        let mut rval = None;
-                        for &(ref val,ref src) in srcs.iter() {
-                            let cpos = conds.len();
-                            if let Some(e_inp) = phi.condition(
-                                phi_inp.clone(),
-                                &Data((&src,instr_id.basic_block)),
-                                &mut conds,cpos) {
+                        update_activation(
+                            &acts,prog,prog_inp,&conds,instr_id.next(),em
+                        )?;
 
-                                let mut rconds: Vec<_> = conds.drain(cpos..)
-                                    .collect();
-                                let rcond = match rconds.len() {
-                                    0 => Transformation::const_bool(true,em)?,
-                                    1 => rconds.remove(0),
-                                    _ => Transformation::and(rconds)
-                                };
-                                let (nval,nval_inp) = translate_value(&m.datalayout,
-                                                                      val,tp,
-                                                                      &m.types,
-                                                                      call_frame,call_frame_inp.clone(),
-                                                                      exprs,em)?;
+                        // Update value
+                        let phi = then(cf.clone(),
+                                       PhiPath);
+                        let mut rval_inp = Vec::new();
+                        let mut rval = None;
+                        let mut nval_inp = Vec::new();
+                        let mut res_inp = Vec::new();
+                        for &(ref val,ref src) in srcs.iter() {
+                            if let Some(el) = Choice::find(
+                                phi.clone(),prog,&prog_inp[..],
+                                |el,from,_,_| {
+                                    let &Data((ref csrc,ref blk)) = el.get(from);
+                                    Ok(*csrc==src &&
+                                       *blk==instr_id.basic_block)
+                                },em)? {
+
+                                nval_inp.clear();
+                                let nval = translate_value(
+                                    &m.datalayout,
+                                    val,tp,
+                                    &m.types,
+                                    &cf,prog,prog_inp,&mut nval_inp,em)?;
+                                let mut nconds = conds.clone();
+                                let sel = Choice::is_selected(
+                                    &el,prog,prog_inp,em)?;
+                                nconds.push(sel);
+                                let rcond = em.and(nconds)?;
                                 rval = match rval {
-                                    None => Some((OptRef::Owned(nval),nval_inp)),
-                                    Some((cval,cval_inp)) => Some(ite(OptRef::Owned(nval),
-                                                                      cval,
-                                                                      rcond,nval_inp,cval_inp,em)?.unwrap())
+                                    None => {
+                                        swap(&mut rval_inp,&mut nval_inp);
+                                        Some(nval)
+                                    },
+                                    Some(cval) => {
+                                        res_inp.clear();
+                                        let res = ite(&rcond,
+                                                      &Id,&nval,&nval_inp[..],
+                                                      &Id,&cval,&rval_inp[..],
+                                                      &mut res_inp,em)?
+                                        .expect("Cannot merge phis");
+                                        Some(res)
+                                    }
                                 };
                             }
                         }
-                        let value_view = call_stack_view.clone()
-                            .then(call_frame_view.clone())
-                            .then(FstView::new())
-                            .then(ValuesView::new())
-                            .then(AssocView::new(name));
-                        let (nval,nval_inp) = rval.unwrap();
-                        value_view.insert_cond(&mut nprog,nval.as_obj(),nval_inp,
-                                               &conds,&mut updates,
-                                               prog_inp.clone(),em)?;
+                        let rcond = if conds.len()==0 {
+                            em.const_bool(true)?
+                        } else {
+                            em.and(conds.clone())?
+                        };
+                        Assoc::insert_cond(then(cf.clone(),
+                                                ValuesPath),
+                                           prog,prog_inp,name,
+                                           rval.unwrap(),&mut rval_inp,
+                                           &rcond,em)?;
                     },
                     _ => panic!("Cannot translate instruction {:#?}",instr)
                 }
             }
         }
     }
-    if !any_call_frames {
-        panic!("No callframes found! {:#?}",prog.threads);
-    }
-    //println!("Threads: {:#?}",nprog.threads);
-    Ok((nprog,finish_updates(updates,prog_inp)))
+    Ok(())
 }
 
-pub fn translate_value<'b,V,Em>(dl: &'b DataLayout,
-                                value: &'b llvm_ir::Value,
-                                tp: &Type,
-                                tps: &'b HashMap<String,Type>,
-                                cf: &CallFrame<'b,V>,
-                                cf_inp: Transf<Em>,
-                                _: &[Em::Expr],
-                                em: &mut Em)
-                                -> Result<(V,Transf<Em>),Em::Error>
-    where V : 'b+Bytes+FromConst<'b>+Pointer<'b>+IntValue+Vector+FromMD<'b>+Clone,Em : DeriveValues {
+pub fn translate_value<'b,FromCf,Cf,V,Em>(
+    dl: &'b DataLayout,
+    value: &'b llvm_ir::Value,
+    tp: &Type,
+    tps: &'b HashMap<String,Type>,
+    cf: &Cf,
+    cf_from: &FromCf,
+    cf_arr: &[Em::Expr],
+    res: &mut Vec<Em::Expr>,
+    em: &mut Em)
+    -> Result<V,Em::Error>
+    where Cf: Path<'b,Em,FromCf,To=CallFrame<'b,V>>,
+          V: 'b+Bytes<'b>+FromConst<'b>+Pointer<'b>+IntValue<'b>+Vector<'b>+FromMD<'b>+Clone,
+          Em: DeriveValues {
     match value {
-        &llvm_ir::Value::Constant(ref c) => {
-            let (obj,els) = translate_constant(dl,c,tp,tps,em)?;
-            Ok((obj,els))
-        },
+        &llvm_ir::Value::Constant(ref c)
+            => translate_constant(dl,c,tp,tps,res,em),
         &llvm_ir::Value::Local(ref name) => {
-            let val_view = ValuesView::new().then(AssocView::new(name));
-            let (val,val_inp) = val_view.get_with_inp(cf,cf_inp);
-            Ok((val.clone(),val_inp))
+            let val_path = Assoc::lookup(then(cf.clone(),
+                                              ValuesPath),
+                                         cf_from,&name)
+                .expect("Cannot find variable");
+            let val = val_path.get(cf_from).clone();
+            val_path.read_into(cf_from,0,val.num_elem(),cf_arr,res,em)?;
+            Ok(val)
         },
         &llvm_ir::Value::Argument(n) => {
-            let val_view = ArgumentsView::new().then(VecView::new(n));
-            let (val,val_inp) = val_view.get_with_inp(cf,cf_inp);
-            Ok((val.clone(),val_inp))
+            let arg_path = then(then(cf.clone(),
+                                     ArgumentsPath),
+                                CompVecP(n));
+            let arg = arg_path.get(cf_from).clone();
+            arg_path.read_into(cf_from,0,arg.num_elem(),cf_arr,res,em)?;
+            Ok(arg)
         },
-        &llvm_ir::Value::Metadata(ref md) => V::from_md(md),
+        &llvm_ir::Value::Metadata(ref md) => V::from_md(md,res,em),
         _ => panic!("Translate value: {:#?}",value)
     }
 }
@@ -1413,9 +1290,10 @@ pub fn translate_constant<'b,V,Em>(dl: &'b DataLayout,
                                    c: &'b llvm_ir::Constant,
                                    tp: &Type,
                                    mp: &HashMap<String,Type>,
+                                   res: &mut Vec<Em::Expr>,
                                    em: &mut Em)
-                                   -> Result<(V,Transf<Em>),Em::Error>
-    where V : Bytes+Pointer<'b>+IntValue+Vector+Clone, Em : Embed {
+                                   -> Result<V,Em::Error>
+    where V: 'b+Bytes<'b>+Pointer<'b>+IntValue<'b>+Vector<'b>+Clone, Em: Embed {
 
     match c {
         &llvm_ir::Constant::Global(ref glb) => {
@@ -1427,45 +1305,44 @@ pub fn translate_constant<'b,V,Em>(dl: &'b DataLayout,
                 &Type::Function(_,_,_) => 0,
                 _ => panic!("Global pointer has wrong type {:?}",tp)
             };
-            let (ptr,inp_ptr) = base_pointer_global(mult as usize,glb,em)?;
+            let mut inp_ptr = Vec::new();
+            let ptr = base_pointer_global(mult as usize,glb,&mut inp_ptr,em)?;
             let (bw,_,_) = dl.pointer_alignment(0);
-            let (res,inp_res) = V::from_pointer((bw/8) as usize,
-                                                OptRef::Owned(ptr),
-                                                inp_ptr);
-            Ok((res.as_obj(),inp_res))
+            let rptr = V::from_pointer((bw/8) as usize,
+                                       &Id::new(),&ptr,&inp_ptr[..],
+                                       res,em)?;
+            Ok(rptr)
         },
         &llvm_ir::Constant::Int(ref val) => match tp {
             &Type::Int(bw) => {
                 let rval = match val.to_biguint() {
                     Some(r) => r,
                     None => match (-val).to_biguint() {
-                        Some(neg_val) => BigUint::from(1 as u8).shl(bw as usize) - neg_val,
+                        Some(neg_val) => BigUint::from(1u8).shl(bw as usize) - neg_val,
                         None => unreachable!()
                     }
                 };
-                let (rv,rv_inp) = V::const_int(bw,rval,em)?;
-                Ok((rv,Transformation::constant(rv_inp)))
+                V::const_int(bw,rval,res,em)
             },
             _ => panic!("Integer value with non-integer type")
         },
         &llvm_ir::Constant::Array(ref arr) => {
-            let mut varr : Vec<V> = Vec::with_capacity(arr.len());
-            let mut earr : Vec<Transf<Em>> = Vec::with_capacity(arr.len());
+            let mut varr: Vec<V> = Vec::with_capacity(arr.len());
             let el_tp = match tp {
                 &Type::Array(_,ref subtp) => subtp,
                 _ => panic!("Array value with non-array type")
             };
             for el in arr.iter() {
-                let (val,c) : (V,Transf<Em>) = translate_constant(dl,el,el_tp,mp,em)?;
+                let val = translate_constant(dl,el,el_tp,mp,res,em)?;
                 varr.push(val);
-                earr.push(c);
             }
-            let (res,inp_res) = V::vector(OptRef::Owned(varr),earr,em)?;
-            Ok((res.as_obj(),inp_res))
+            V::vector(varr,res,em)
         },
         &llvm_ir::Constant::GEP(ref gep) => {
             let mut cur_tp = &gep.ptr.tp;
-            let mut res = Vec::with_capacity(gep.indices.len());
+            let mut rgep_inp = Vec::new();
+            let mut rgep = CompVec::with_capacity(gep.indices.len(),
+                                                  &mut rgep_inp,em)?;
             for &(ref el,_) in gep.indices.iter() {
                 cur_tp = match cur_tp {
                     &Type::Struct(ref sub_tps) => match el.val {
@@ -1478,7 +1355,9 @@ pub fn translate_constant<'b,V,Em>(dl: &'b DataLayout,
                             for sub_tp in sub_tps.iter().take(ridx) {
                                 coff += dl.type_size_in_bits(sub_tp,mp)/8;
                             }
-                            res.push((None,coff as usize));
+                            CompVec::push(&Id::new(),&mut rgep,&mut rgep_inp,
+                                          (None,Data(coff as usize)),
+                                          &mut Vec::new(),em)?;
                             &sub_tps[ridx]
                         },
                         _ => panic!("Struct not indexed by constant int")
@@ -1487,7 +1366,9 @@ pub fn translate_constant<'b,V,Em>(dl: &'b DataLayout,
                         let sz = dl.type_size_in_bits(ptr_tp,mp)/8;
                         match el.val {
                             llvm_ir::Constant::Int(ref idx) => {
-                                res.push((None,idx.to_usize().unwrap()*(sz as usize)))
+                                CompVec::push(&Id::new(),&mut rgep,&mut rgep_inp,
+                                              (None,Data(idx.to_usize().unwrap()*(sz as usize))),
+                                              &mut Vec::new(),em)?;
                             },
                             _ => panic!("Pointer not indexed properly")
                         }
@@ -1505,7 +1386,9 @@ pub fn translate_constant<'b,V,Em>(dl: &'b DataLayout,
                         let sz = dl.type_size_in_bits(sub_tp,mp)/8;
                         match el.val {
                             llvm_ir::Constant::Int(ref idx) => {
-                                res.push((None,idx.to_usize().unwrap()*(sz as usize)))
+                                CompVec::push(&Id::new(),&mut rgep,&mut rgep_inp,
+                                              (None,Data(idx.to_usize().unwrap()*(sz as usize))),
+                                              &mut Vec::new(),em)?;
                             },
                             _ => panic!("Array not indexed properly")
                         }
@@ -1514,18 +1397,23 @@ pub fn translate_constant<'b,V,Em>(dl: &'b DataLayout,
                     _ => unimplemented!()
                 }
             }
-            let (base,base_inp) : (V,Transf<Em>) = translate_constant(dl,&gep.ptr.val,&gep.ptr.tp,mp,em)?;
+            let mut base_inp = Vec::new();
+            let base: V = translate_constant(dl,&gep.ptr.val,&gep.ptr.tp,mp,
+                                             &mut base_inp,em)?;
             let bw = base.byte_width();
-            let (ptr,ptr_inp) = V::to_pointer(OptRef::Owned(base),base_inp).expect("Cannot convert to pointer");
-            let (nptr,nptr_inp) = base_pointer_gep(ptr,ptr_inp,res,em)?;
-            let (res,inp_res) = V::from_pointer(bw,nptr,nptr_inp);
-            Ok((res.as_obj(),inp_res))
+            let mut ptr_inp = Vec::new();
+            let mut ptr = V::to_pointer(&Id::new(),&base,&base_inp[..],
+                                        &mut ptr_inp,em)?
+            .expect("Cannot convert to pointer");
+            base_pointer_gep(Id::new(),&mut ptr,&mut ptr_inp,
+                             &Id::new(),&rgep,&rgep_inp[..],em)?;
+            V::from_pointer(bw,&Id::new(),&ptr,&ptr_inp[..],res,em)
         },
         &llvm_ir::Constant::NullPtr => {
             let bw = (dl.pointer_alignment(0).0 / 8) as usize;
-            let (base,base_inp) = base_pointer_null(em)?;
-            let (ptr,ptr_inp) = V::from_pointer(bw,OptRef::Owned(base),base_inp);
-            Ok((ptr.as_obj(),ptr_inp))
+            let mut base_inp = Vec::new();
+            let base = base_pointer_null(&mut base_inp,em)?;
+            V::from_pointer(bw,&Id::new(),&base,&base_inp[..],res,em)
         },
         _ => panic!("Cannot translate constant {:?}",c)
     }
@@ -1543,126 +1431,346 @@ fn resolve_tp<'a>(mut tp: &'a Type,tps: &'a HashMap<String,Type>) -> &'a Type {
     }
 }
 
-pub fn translate_global<'b,V>(dl: &'b DataLayout,
-                              c: &'b llvm_ir::Constant,
-                              tp: &'b Type,
-                              mp: &'b HashMap<String,Type>)
-                              -> MemSlice<'b,V>
-    where V : Bytes+Clone {
-    let mut res = Vec::new();
-    translate_global_(dl,c,tp,mp,&mut res);
-    MemSlice(res)
+pub fn translate_global<'b,V,Em>(dl: &'b DataLayout,
+                                 c: &'b llvm_ir::Constant,
+                                 tp: &'b Type,
+                                 mp: &'b HashMap<String,Type>,
+                                 res: &mut Vec<Em::Expr>,
+                                 em: &mut Em)
+                                 -> Result<MemSlice<'b,V>,Em::Error>
+    where V: 'b+HasSorts+Clone,
+          Em: Embed {
+    let mut arr = CompVec::new(res,em)?;
+    translate_global_(dl,c,tp,mp,&Id::new(),&mut arr,res,em)?;
+    Ok(MemSlice(arr))
 }
 
-fn translate_global_<'b,V>(dl: &'b DataLayout,
-                           c: &'b llvm_ir::Constant,
-                           tp: &'b Type,
-                           mp: &'b HashMap<String,Type>,
-                           res: &mut Vec<MemObj<'b,V>>)
-                           -> ()
-    where V : Bytes+Clone {
+fn translate_global_<'a,V,From,P,Em>(
+    dl: &'a DataLayout,
+    c: &'a llvm_ir::Constant,
+    tp: &'a Type,
+    mp: &'a HashMap<String,Type>,
+    path: &P,
+    from: &mut From,
+    arr: &mut Vec<Em::Expr>,
+    em: &mut Em)
+    -> Result<(),Em::Error>
+    where V: 'a+HasSorts+Clone,
+          Em: Embed,
+          P: Path<'a,Em,From,To=CompVec<MemObj<'a,V>>> {
 
     match c {
-        &llvm_ir::Constant::Array(ref arr) => {
+        &llvm_ir::Constant::Array(ref elems) => {
             let el_tp = match tp {
                 &Type::Array(_,ref subtp) => subtp,
                 _ => panic!("Array value with non-array type")
             };
-            for el in arr.iter() {
-                translate_global_(dl,el,el_tp,mp,res);
+            for el in elems.iter() {
+                translate_global_(dl,el,el_tp,mp,path,from,arr,em)?;
             }
         },
         _ => {
-            res.push(MemObj::ConstObj(dl,c,tp,mp));
+            CompVec::push(path,from,arr,
+                          MemObj::ConstObj(dl,c,tp,mp),
+                          &mut Vec::new(),em)?;
         }
     }
-}*/
+    Ok(())
+}
 
 pub trait IntValue<'a>: Composite<'a> {
     fn const_int<Em: Embed>(u64,BigUint,&mut Vec<Em::Expr>,&mut Em)
                             -> Result<Self,Em::Error>;
-    fn bin<P1: Path<'a,Em,To=Self>,
-           P2: Path<'a,Em,To=Self>,
+    fn bin<From1,P1: Path<'a,Em,From1,To=Self>,
+           From2,P2: Path<'a,Em,From2,To=Self>,
            Em: DeriveValues>(op: &llvm_ir::BinOp,
                              lhs: &P1,
-                             lfrom: &P1::From,
+                             lfrom: &From1,
                              larr: &[Em::Expr],
                              rhs: &P2,
-                             rfrom: &P2::From,
+                             rfrom: &From2,
                              rarr: &[Em::Expr],
                              res: &mut Vec<Em::Expr>,
                              em: &mut Em)
-                             -> Result<Self,Em::Error>;
-    fn sext<P: Path<'a,Em,To=Self>,
-            Em: Embed>(&P,&P::From,&[Em::Expr],usize,&mut Vec<Em::Expr>,&mut Em)
-                       -> Result<Self,Em::Error>;
-    fn zext<P: Path<'a,Em,To=Self>,
-            Em: Embed>(&P,&P::From,&[Em::Expr],usize,&mut Vec<Em::Expr>,&mut Em)
-                       -> Result<Self,Em::Error>;
-    fn trunc<P: Path<'a,Em,To=Self>,
-             Em: Embed>(&P,&P::From,&[Em::Expr],usize,&mut Vec<Em::Expr>,&mut Em)
-                        -> Result<Self,Em::Error>;
-    fn icmp<P1: Path<'a,Em,To=Self>,
-            P2: Path<'a,Em,To=Self>,
+                             -> Result<Self,Em::Error>
+        where Self: 'a;
+    fn sext<From,P: Path<'a,Em,From,To=Self>,
+            Em: Embed>(&P,&From,&[Em::Expr],usize,&mut Vec<Em::Expr>,&mut Em)
+                       -> Result<Self,Em::Error>
+        where Self: 'a;
+    fn zext<From,P: Path<'a,Em,From,To=Self>,
+            Em: Embed>(&P,&From,&[Em::Expr],usize,&mut Vec<Em::Expr>,&mut Em)
+                       -> Result<Self,Em::Error>
+        where Self: 'a;
+    fn trunc<From,P: Path<'a,Em,From,To=Self>,
+             Em: Embed>(&P,&From,&[Em::Expr],usize,&mut Vec<Em::Expr>,&mut Em)
+                        -> Result<Self,Em::Error>
+        where Self: 'a;
+    fn icmp<From1,P1: Path<'a,Em,From1,To=Self>,
+            From2,P2: Path<'a,Em,From2,To=Self>,
             Em: Embed>(&llvm_ir::CmpOp,
-                       &P1,&P1::From,&[Em::Expr],
-                       &P2,&P2::From,&[Em::Expr],
+                       &P1,&From1,&[Em::Expr],
+                       &P2,&From2,&[Em::Expr],
                        &mut Em)
-                       -> Result<Em::Expr,Em::Error>;
+                       -> Result<Em::Expr,Em::Error>
+        where Self: 'a;
     fn from_bool<Em: Embed>(Em::Expr,&mut Vec<Em::Expr>,&mut Em)
                             -> Result<Self,Em::Error>;
-    fn to_bool<P: Path<'a,Em,To=Self>,
-               Em: Embed>(&P,&P::From,&[Em::Expr],&mut Em)
-                          -> Result<Em::Expr,Em::Error>;
-    fn to_offset<P: Path<'a,Em,To=Self>,
-                 Em: Embed>(&P,&P::From,&[Em::Expr],&mut Vec<Em::Expr>,&mut Em)
-                            -> Result<Singleton,Em::Error>;
-    fn from_offset<P: Path<'a,Em,To=Singleton>,
-                   Em: Embed>(usize,&P,&P::From,&[Em::Expr],
+    fn to_bool<From,P: Path<'a,Em,From,To=Self>,
+               Em: Embed>(&P,&From,&[Em::Expr],&mut Em)
+                          -> Result<Em::Expr,Em::Error>
+        where Self: 'a;
+    fn to_offset<From,P: Path<'a,Em,From,To=Self>,
+                 Em: Embed>(&P,&From,&[Em::Expr],&mut Vec<Em::Expr>,&mut Em)
+                            -> Result<Singleton,Em::Error>
+        where Self: 'a;
+    fn from_offset<From,P: Path<'a,Em,From,To=Singleton>,
+                   Em: Embed>(usize,&P,&From,&[Em::Expr],
                               &mut Vec<Em::Expr>,&mut Em)
                               -> Result<Self,Em::Error>;
 }
-/*
-pub trait FromMD<'a> : Composite {
-    fn from_md<Em : Embed>(&'a llvm_ir::Metadata)
-                           -> Result<(Self,Transf<Em>),Em::Error>;
+
+pub trait FromMD<'a>: Composite<'a> {
+    fn from_md<Em: Embed>(&'a llvm_ir::Metadata,
+                          &mut Vec<Em::Expr>,
+                          &mut Em)
+                          -> Result<Self,Em::Error>;
 }
 
-/*pub trait Pointer<'a> : Composite {
-    fn null<Em : Embed>(u64,&mut Em) -> Result<(Self,Vec<Em::Expr>),Em::Error>;
-    fn global<Em : Embed>(u64,&'a String,&mut Em) -> Result<(Self,Vec<Em::Expr>),Em::Error>;
-    fn gep<Em : Embed>(Self,
-                       Transf<Em>,
-                       Vec<(Option<(Self,Transf<Em>)>,u64)>,
-                       &mut Em)
-                       -> Result<(Self,Transf<Em>),Em::Error>;
-}*/
-
-pub trait Vector : Composite {
-    fn vector<'a,Em : Embed>(OptRef<'a,Vec<Self>>,Vec<Transf<Em>>,&mut Em) -> Result<(OptRef<'a,Self>,Transf<Em>),Em::Error>;
+pub trait Vector<'a>: Composite<'a> {
+    fn vector<Em: Embed>(Vec<Self>,&mut Vec<Em::Expr>,&mut Em)
+                         -> Result<Self,Em::Error>;
 }
 
 #[derive(PartialEq,Eq,Hash,Clone,Debug)]
 pub enum CompValue<Ptr,V> {
     Value(V),
     Pointer(BitField<Ptr>),
-    Vector(Vec<CompValue<Ptr,V>>),
+    Vector(CompVec<CompValue<Ptr,V>>),
     Metadata
 }
 
-pub enum CompValueMeaning<Ptr : Semantic+HasSorts,V : Semantic> {
+#[derive(Clone)]
+pub struct CompValueValueP;
+#[derive(Clone)]
+pub struct CompValuePointerP;
+#[derive(Clone)]
+pub struct CompValueVectorP;
+
+pub enum CompValueMeaning<Ptr: Semantic+HasSorts,V: Semantic> {
     Value(V::Meaning),
     Pointer(<BitField<Ptr> as Semantic>::Meaning),
     Vector(Box<VecMeaning<CompValueMeaning<Ptr,V>>>)
 }
 
-pub enum CompValueMeaningCtx<Ptr : Semantic+HasSorts,V : Semantic> {
+pub enum CompValueMeaningCtx<Ptr: Semantic+HasSorts,V: Semantic> {
     Value(V::MeaningCtx),
     Pointer(<BitField<Ptr> as Semantic>::MeaningCtx),
     Vector(Box<CompValueMeaningCtx<Ptr,V>>)
 }
 
-impl<Ptr : Semantic+HasSorts,V : Semantic> Clone for CompValueMeaning<Ptr,V> {
+impl<Ptr,V> CompValue<Ptr,V> {
+    pub fn value() -> CompValueValueP {
+        CompValueValueP
+    }
+    pub fn pointer() -> CompValuePointerP {
+        CompValuePointerP
+    }
+    pub fn vector() -> CompValueVectorP {
+        CompValueVectorP
+    }
+}
+
+impl<'a,Ptr: 'a,V: 'a> SimplePathEl<'a,CompValue<Ptr,V>> for CompValueValueP {
+    type To = V;
+    fn get<'b>(&self,from: &'b CompValue<Ptr,V>) -> &'b Self::To where 'a: 'b {
+        match from {
+            &CompValue::Value(ref v) => v,
+            _ => panic!("CompValue not a Value")
+        }
+    }
+    fn get_mut<'b>(&self,from: &'b mut CompValue<Ptr,V>)
+                   -> &'b mut Self::To where 'a: 'b {
+        match from {
+            &mut CompValue::Value(ref mut v) => v,
+            _ => panic!("CompValue not a Value")
+        }
+    }
+}
+
+impl<'a,Ptr: 'a,V: 'a> SimplePathEl<'a,CompValue<Ptr,V>> for CompValuePointerP {
+    type To = BitField<Ptr>;
+    fn get<'b>(&self,from: &'b CompValue<Ptr,V>) -> &'b Self::To where 'a: 'b {
+        match from {
+            &CompValue::Pointer(ref v) => v,
+            _ => panic!("CompValue not a Pointer")
+        }
+    }
+    fn get_mut<'b>(&self,from: &'b mut CompValue<Ptr,V>)
+                   -> &'b mut Self::To where 'a: 'b {
+        match from {
+            &mut CompValue::Pointer(ref mut v) => v,
+            _ => panic!("CompValue not a Pointer")
+        }
+    }
+}
+
+impl<'a,Ptr: 'a,V: 'a> SimplePathEl<'a,CompValue<Ptr,V>> for CompValueVectorP {
+    type To = CompVec<CompValue<Ptr,V>>;
+    fn get<'b>(&self,from: &'b CompValue<Ptr,V>) -> &'b Self::To where 'a: 'b {
+        match from {
+            &CompValue::Vector(ref v) => v,
+            _ => panic!("CompValue not a Vector")
+        }
+    }
+    fn get_mut<'b>(&self,from: &'b mut CompValue<Ptr,V>)
+                   -> &'b mut Self::To where 'a: 'b {
+        match from {
+            &mut CompValue::Vector(ref mut v) => v,
+            _ => panic!("CompValue not a Vector")
+        }
+    }
+}
+
+impl<'a,Em: Embed,Ptr: 'a,V: 'a> PathEl<'a,Em,CompValue<Ptr,V>> for CompValueValueP {
+    fn read<PrevFrom,Prev: Path<'a,Em,PrevFrom,To=CompValue<Ptr,V>>>(
+        &self,
+        prev: &Prev,
+        from: &PrevFrom,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        prev.read(from,pos,arr,em)
+    }
+    fn read_slice<'b,PrevFrom,Prev: Path<'a,Em,PrevFrom,To=CompValue<Ptr,V>>>(
+        &self,
+        prev: &Prev,
+        from: &PrevFrom,
+        pos: usize,
+        len: usize,
+        arr: &'b [Em::Expr])
+        -> Option<&'b [Em::Expr]> {
+        prev.read_slice(from,pos,len,arr)
+    }
+    fn write<PrevFrom,Prev: Path<'a,Em,PrevFrom,To=CompValue<Ptr,V>>>(
+        &self,
+        prev: &Prev,
+        from: &PrevFrom,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write(from,pos,e,arr,em)
+    }
+    fn write_slice<PrevFrom,Prev: Path<'a,Em,PrevFrom,To=CompValue<Ptr,V>>>(
+        &self,
+        prev: &Prev,
+        from: &mut PrevFrom,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write_slice(from,pos,old_len,src,trg,em)
+    }
+}
+
+impl<'a,Em: Embed,Ptr: 'a,V: 'a> PathEl<'a,Em,CompValue<Ptr,V>> for CompValuePointerP {
+    fn read<PrevFrom,Prev: Path<'a,Em,PrevFrom,To=CompValue<Ptr,V>>>(
+        &self,
+        prev: &Prev,
+        from: &PrevFrom,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        prev.read(from,pos,arr,em)
+    }
+    fn read_slice<'b,PrevFrom,Prev: Path<'a,Em,PrevFrom,To=CompValue<Ptr,V>>>(
+        &self,
+        prev: &Prev,
+        from: &PrevFrom,
+        pos: usize,
+        len: usize,
+        arr: &'b [Em::Expr])
+        -> Option<&'b [Em::Expr]> {
+        prev.read_slice(from,pos,len,arr)
+    }
+    fn write<PrevFrom,Prev: Path<'a,Em,PrevFrom,To=CompValue<Ptr,V>>>(
+        &self,
+        prev: &Prev,
+        from: &PrevFrom,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write(from,pos,e,arr,em)
+    }
+    fn write_slice<PrevFrom,Prev: Path<'a,Em,PrevFrom,To=CompValue<Ptr,V>>>(
+        &self,
+        prev: &Prev,
+        from: &mut PrevFrom,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write_slice(from,pos,old_len,src,trg,em)
+    }
+}
+
+impl<'a,Em: Embed,Ptr: 'a,V: 'a> PathEl<'a,Em,CompValue<Ptr,V>> for CompValueVectorP {
+    fn read<PrevFrom,Prev: Path<'a,Em,PrevFrom,To=CompValue<Ptr,V>>>(
+        &self,
+        prev: &Prev,
+        from: &PrevFrom,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        prev.read(from,pos,arr,em)
+    }
+    fn read_slice<'b,PrevFrom,Prev: Path<'a,Em,PrevFrom,To=CompValue<Ptr,V>>>(
+        &self,
+        prev: &Prev,
+        from: &PrevFrom,
+        pos: usize,
+        len: usize,
+        arr: &'b [Em::Expr])
+        -> Option<&'b [Em::Expr]> {
+        prev.read_slice(from,pos,len,arr)
+    }
+    fn write<PrevFrom,Prev: Path<'a,Em,PrevFrom,To=CompValue<Ptr,V>>>(
+        &self,
+        prev: &Prev,
+        from: &PrevFrom,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write(from,pos,e,arr,em)
+    }
+    fn write_slice<PrevFrom,Prev: Path<'a,Em,PrevFrom,To=CompValue<Ptr,V>>>(
+        &self,
+        prev: &Prev,
+        from: &mut PrevFrom,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write_slice(from,pos,old_len,src,trg,em)
+    }
+}
+
+impl<Ptr: Semantic+HasSorts,V: Semantic> Clone for CompValueMeaning<Ptr,V> {
     fn clone(&self) -> Self {
         match self {
             &CompValueMeaning::Value(ref m) => CompValueMeaning::Value(m.clone()),
@@ -1672,7 +1780,7 @@ impl<Ptr : Semantic+HasSorts,V : Semantic> Clone for CompValueMeaning<Ptr,V> {
     }
 }
 
-impl<V : Semantic+HasSorts,U : Semantic> PartialEq for CompValueMeaning<V,U> {
+impl<V: Semantic+HasSorts,U: Semantic> PartialEq for CompValueMeaning<V,U> {
     fn eq(&self,other: &CompValueMeaning<V,U>) -> bool {
         match self {
             &CompValueMeaning::Value(ref p) => match other {
@@ -1691,15 +1799,15 @@ impl<V : Semantic+HasSorts,U : Semantic> PartialEq for CompValueMeaning<V,U> {
     }
 }
 
-impl<V : Semantic+HasSorts,U : Semantic> Eq for CompValueMeaning<V,U> {}
+impl<V: Semantic+HasSorts,U: Semantic> Eq for CompValueMeaning<V,U> {}
 
-impl<V : Semantic+HasSorts,U : Semantic> PartialOrd for CompValueMeaning<V,U> {
+impl<V: Semantic+HasSorts,U: Semantic> PartialOrd for CompValueMeaning<V,U> {
     fn partial_cmp(&self,other: &CompValueMeaning<V,U>) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<V : Semantic+HasSorts,U : Semantic> Ord for CompValueMeaning<V,U> {
+impl<V: Semantic+HasSorts,U: Semantic> Ord for CompValueMeaning<V,U> {
     fn cmp(&self,other: &CompValueMeaning<V,U>) -> Ordering {
         match (self,other) {
             (&CompValueMeaning::Value(ref p),
@@ -1716,7 +1824,7 @@ impl<V : Semantic+HasSorts,U : Semantic> Ord for CompValueMeaning<V,U> {
     }
 }
 
-impl<V : Semantic+HasSorts,U : Semantic> Hash for CompValueMeaning<V,U> {
+impl<V: Semantic+HasSorts,U: Semantic> Hash for CompValueMeaning<V,U> {
     fn hash<H>(&self, state: &mut H) where H: Hasher {
         match self {
             &CompValueMeaning::Value(ref p) => {
@@ -1735,7 +1843,7 @@ impl<V : Semantic+HasSorts,U : Semantic> Hash for CompValueMeaning<V,U> {
     }
 }
 
-impl<V : Semantic+HasSorts,U : Semantic> fmt::Debug for CompValueMeaning<V,U> {
+impl<V: Semantic+HasSorts,U: Semantic> fmt::Debug for CompValueMeaning<V,U> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         match self {
             &CompValueMeaning::Value(ref p) => f.debug_tuple("Value")
@@ -1748,7 +1856,7 @@ impl<V : Semantic+HasSorts,U : Semantic> fmt::Debug for CompValueMeaning<V,U> {
     }
 }
 
-impl<Ptr : Semantic+HasSorts,V : Semantic+HasSorts> Semantic for CompValue<Ptr,V> {
+impl<Ptr: Semantic+HasSorts,V: Semantic+HasSorts> Semantic for CompValue<Ptr,V> {
     type Meaning = CompValueMeaning<Ptr,V>;
     type MeaningCtx = CompValueMeaningCtx<Ptr,V>;
     fn meaning(&self,pos: usize) -> Self::Meaning {
@@ -1839,13 +1947,23 @@ pub struct ByteWidth<V> {
     byte_width: usize
 }
 
-impl<V : Semantic> Semantic for ByteWidth<V> {
+#[derive(Clone)]
+pub struct ByteWidthP;
+
+impl<V> ByteWidth<V> {
+    pub fn element() -> ByteWidthP {
+        ByteWidthP
+    }
+}
+
+impl<V: Semantic> Semantic for ByteWidth<V> {
     type Meaning = V::Meaning;
     type MeaningCtx = V::MeaningCtx;
     fn meaning(&self,pos: usize) -> Self::Meaning {
         self.value.meaning(pos)
     }
-    fn fmt_meaning<F : fmt::Write>(&self,m: &Self::Meaning,fmt: &mut F) -> Result<(),fmt::Error> {
+    fn fmt_meaning<F : fmt::Write>(&self,m: &Self::Meaning,fmt: &mut F)
+                                   -> Result<(),fmt::Error> {
         self.value.fmt_meaning(m,fmt)
     }
     fn first_meaning(&self) -> Option<(Self::MeaningCtx,Self::Meaning)> {
@@ -1861,6 +1979,149 @@ impl<V : Semantic> Semantic for ByteWidth<V> {
 pub enum BitVecValue {
     BoolValue(usize),
     BitVecValue(usize)
+}
+
+impl BitVecValue {
+    pub fn bitwidth(&self) -> usize {
+        match self {
+            &BitVecValue::BoolValue(w) => w,
+            &BitVecValue::BitVecValue(w) => w
+        }
+    }
+    pub fn as_bitvec<'a,Em: Embed,From,P: Path<'a,Em,From,To=Self>>(
+        path: &P,
+        from: &From,
+        arr: &[Em::Expr],
+        em: &mut Em
+    ) -> Result<Em::Expr,Em::Error> {
+        match path.get(from) {
+            &BitVecValue::BoolValue(w) => {
+                let bit = path.read(from,0,arr,em)?;
+                let bv0 = em.const_bitvec(w,BigUint::from(0u8))?;
+                let bv1 = em.const_bitvec(w,BigUint::from(1u8))?;
+                em.ite(bit,bv0,bv1)
+            },
+            &BitVecValue::BitVecValue(w) => {
+                path.read(from,0,arr,em)
+            }
+        }
+    }
+    pub fn bv_op<'a,Em: Embed,
+                 FromL,PL: Path<'a,Em,FromL,To=Self>,
+                 FromR,PR: Path<'a,Em,FromR,To=Self>,
+                 F: FnOnce(Em::Expr,Em::Expr,&mut Em)
+                           -> Result<Em::Expr,Em::Error>>(
+        lpath: &PL,
+        lfrom: &FromL,
+        larr:  &[Em::Expr],
+        rpath: &PR,
+        rfrom: &FromR,
+        rarr:  &[Em::Expr],
+        res: &mut Vec<Em::Expr>,
+        em: &mut Em,
+        f: F) -> Result<Self,Em::Error> {
+
+        let szl = lpath.get(lfrom).bitwidth();
+        let szr = rpath.get(rfrom).bitwidth();
+        assert_eq!(szl,szr);
+        let rl = Self::as_bitvec(lpath,lfrom,larr,em)?;
+        let rr = Self::as_bitvec(rpath,rfrom,rarr,em)?;
+        let outp = f(rl,rr,em)?;
+        res.push(outp);
+        Ok(BitVecValue::BitVecValue(szl))
+    }
+    pub fn op<'a,Em: Embed,
+              FromL,PL: Path<'a,Em,FromL,To=Self>,
+              FromR,PR: Path<'a,Em,FromR,To=Self>,
+              FBool: FnOnce(Em::Expr,Em::Expr,&mut Em)
+                            -> Result<Em::Expr,Em::Error>,
+              FBV: FnOnce(Em::Expr,Em::Expr,&mut Em)
+                          -> Result<Em::Expr,Em::Error>>(
+        lpath: &PL,
+        lfrom: &FromL,
+        larr:  &[Em::Expr],
+        rpath: &PR,
+        rfrom: &FromR,
+        rarr:  &[Em::Expr],
+        res: &mut Vec<Em::Expr>,
+        em: &mut Em,
+        fbool: FBool,
+        fbv: FBV) -> Result<Self,Em::Error> {
+
+        if let &BitVecValue::BoolValue(szl) = lpath.get(lfrom) {
+            if let &BitVecValue::BoolValue(szr) = rpath.get(rfrom) {
+                assert_eq!(szl,szr);
+                let bitl = lpath.read(lfrom,0,larr,em)?;
+                let bitr = rpath.read(rfrom,0,rarr,em)?;
+                let outp = fbool(bitl,bitr,em)?;
+                res.push(outp);
+                return Ok(BitVecValue::BoolValue(szl))
+            }
+        }
+        let szl = lpath.get(lfrom).bitwidth();
+        let szr = rpath.get(rfrom).bitwidth();
+        assert_eq!(szl,szr);
+        let rl = Self::as_bitvec(lpath,lfrom,larr,em)?;
+        let rr = Self::as_bitvec(rpath,rfrom,rarr,em)?;
+        let outp = fbv(rl,rr,em)?;
+        res.push(outp);
+        Ok(BitVecValue::BitVecValue(szl))
+    }
+    pub fn cmp<'a,Em: Embed,
+               FromL,PL: Path<'a,Em,FromL,To=Self>,
+               FromR,PR: Path<'a,Em,FromR,To=Self>,
+               FBool: FnOnce(Em::Expr,Em::Expr,&mut Em)
+                             -> Result<Em::Expr,Em::Error>,
+               FBV: FnOnce(Em::Expr,Em::Expr,&mut Em)
+                           -> Result<Em::Expr,Em::Error>>(
+        lpath: &PL,
+        lfrom: &FromL,
+        larr:  &[Em::Expr],
+        rpath: &PR,
+        rfrom: &FromR,
+        rarr:  &[Em::Expr],
+        em: &mut Em,
+        fbool: FBool,
+        fbv: FBV) -> Result<Em::Expr,Em::Error> {
+        if let &BitVecValue::BoolValue(szl) = lpath.get(lfrom) {
+            if let &BitVecValue::BoolValue(szr) = rpath.get(rfrom) {
+                assert_eq!(szl,szr);
+                let bitl = lpath.read(lfrom,0,larr,em)?;
+                let bitr = rpath.read(rfrom,0,rarr,em)?;
+                let outp = fbool(bitl,bitr,em)?;
+                return Ok(outp)
+            }
+        }
+        let szl = lpath.get(lfrom);
+        let szr = rpath.get(rfrom);
+        assert_eq!(szl,szr);
+        let rl = Self::as_bitvec(lpath,lfrom,larr,em)?;
+        let rr = Self::as_bitvec(rpath,rfrom,rarr,em)?;
+        let outp = fbv(rl,rr,em)?;
+        Ok(outp)
+    }
+    pub fn cmp_bv<'a,Em: Embed,
+                  FromL,PL: Path<'a,Em,FromL,To=Self>,
+                  FromR,PR: Path<'a,Em,FromR,To=Self>,
+                  FBV: FnOnce(Em::Expr,Em::Expr,&mut Em)
+                              -> Result<Em::Expr,Em::Error>>(
+        lpath: &PL,
+        lfrom: &FromL,
+        larr:  &[Em::Expr],
+        rpath: &PR,
+        rfrom: &FromR,
+        rarr:  &[Em::Expr],
+        em: &mut Em,
+        fbv: FBV) -> Result<Em::Expr,Em::Error> {
+
+        let szl = lpath.get(lfrom);
+        let szr = rpath.get(rfrom);
+        assert_eq!(szl,szr);
+        let rl = Self::as_bitvec(lpath,lfrom,larr,em)?;
+        let rr = Self::as_bitvec(rpath,rfrom,rarr,em)?;
+        let outp = fbv(rl,rr,em)?;
+        Ok(outp)
+    }
 }
 
 impl Semantic for BitVecValue {
@@ -1892,55 +2153,68 @@ impl HasSorts for BitVecValue {
     }
 }
 
-impl Composite for BitVecValue {
-    fn combine<'a,Em,FComb,FL,FR>(x: OptRef<'a,Self>,y: OptRef<'a,Self>,
-                                  inp_x: Transf<Em>,inp_y: Transf<Em>,
-                                  comb: &FComb,_: &FL,_: &FR,em: &mut Em)
-                                  -> Result<Option<(OptRef<'a,Self>,Transf<Em>)>,Em::Error>
-        where Em : Embed,
-              FComb : Fn(Transf<Em>,Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
-              FL : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
-              FR : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error> {
-    
-        match *x.as_ref() {
-            BitVecValue::BoolValue(sz1) => match *y.as_ref() {
-                BitVecValue::BoolValue(sz2)
+impl<'a> Composite<'a> for BitVecValue {
+    fn combine<Em,FromL,PL,FromR,PR,FComb,FL,FR>(
+        pl: &PL,froml: &FromL,arrl: &[Em::Expr],
+        pr: &PR,fromr: &FromR,arrr: &[Em::Expr],
+        comb: &FComb,only_l: &FL,only_r: &FR,
+        res: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<Option<Self>,Em::Error>
+        where
+        Self: 'a,
+        Em: Embed,
+        PL: Path<'a,Em,FromL,To=Self>,
+        PR: Path<'a,Em,FromR,To=Self>,
+        FComb: Fn(Em::Expr,Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
+        FL: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
+        FR: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error> {
+
+        match pl.get(froml) {
+            &BitVecValue::BoolValue(sz1) => match pr.get(fromr) {
+                &BitVecValue::BoolValue(sz2)
                     => if sz1==sz2 {
-                        let outp = comb(inp_x,inp_y,em)?;
-                        Ok(Some((OptRef::Owned(BitVecValue::BoolValue(sz1)),outp)))
+                        let bitl = pl.read(froml,0,arrl,em)?;
+                        let bitr = pr.read(fromr,0,arrr,em)?;
+                        let outp = comb(bitl,bitr,em)?;
+                        res.push(outp);
+                        Ok(Some(BitVecValue::BoolValue(sz1)))
                     } else {
                         Ok(None)
                     },
-                BitVecValue::BitVecValue(sz2)
+                &BitVecValue::BitVecValue(sz2)
                     => if sz1==sz2 {
-                        let f = move |_:&[Em::Expr],_:usize,e: Em::Expr,em: &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            em.ite(e,bv1,bv0)
-                        };
-                        let ninp_x = Transformation::map_by_elem(Box::new(f),inp_x);
-                        let outp = comb(ninp_x,inp_y,em)?;
-                        Ok(Some((OptRef::Owned(BitVecValue::BitVecValue(sz1)),outp)))
+                        let bitl = pl.read(froml,0,arrl,em)?;
+                        let vecr = pr.read(fromr,0,arrr,em)?;
+                        let bv0 = em.const_bitvec(sz1,BigUint::from(0u8))?;
+                        let bv1 = em.const_bitvec(sz1,BigUint::from(1u8))?;
+                        let vecl = em.ite(bitl,bv1,bv0)?;
+                        let outp = comb(vecl,vecr,em)?;
+                        res.push(outp);
+                        Ok(Some(BitVecValue::BitVecValue(sz1)))
                     } else {
                         Ok(None)
                     }
             },
-            BitVecValue::BitVecValue(sz1) => match *y.as_ref() {
-                BitVecValue::BoolValue(sz2) => if sz1==sz2 {
-                    let f = move |_:&[Em::Expr],_:usize,e: Em::Expr,em: &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            em.ite(e,bv1,bv0)
-                        };
-                    let ninp_y = Transformation::map_by_elem(Box::new(f),inp_y);
-                    let outp = comb(inp_x,ninp_y,em)?;
-                    Ok(Some((OptRef::Owned(BitVecValue::BitVecValue(sz1)),outp)))
+            &BitVecValue::BitVecValue(sz1) => match pr.get(fromr) {
+                &BitVecValue::BoolValue(sz2) => if sz1==sz2 {
+                    let vecl = pl.read(froml,0,arrl,em)?;
+                    let bitr = pr.read(fromr,0,arrr,em)?;
+                    let bv0 = em.const_bitvec(sz1,BigUint::from(0u8))?;
+                    let bv1 = em.const_bitvec(sz1,BigUint::from(1u8))?;
+                    let vecr = em.ite(bitr,bv1,bv0)?;
+                    let outp = comb(vecl,vecr,em)?;
+                    res.push(outp);
+                    Ok(Some(BitVecValue::BitVecValue(sz1)))
                 } else {
                     Ok(None)
                 },
-                BitVecValue::BitVecValue(sz2) => if sz1==sz2 {
-                    let outp = comb(inp_x,inp_y,em)?;
-                    Ok(Some((OptRef::Owned(BitVecValue::BitVecValue(sz2)),outp)))
+                &BitVecValue::BitVecValue(sz2) => if sz1==sz2 {
+                    let vecl = pl.read(froml,0,arrl,em)?;
+                    let vecr = pr.read(fromr,0,arrr,em)?;
+                    let outp = comb(vecl,vecr,em)?;
+                    res.push(outp);
+                    Ok(Some(BitVecValue::BitVecValue(sz1)))
                 } else {
                     Ok(None)
                 }
@@ -1949,794 +2223,281 @@ impl Composite for BitVecValue {
     }
 }
 
-impl IntValue for BitVecValue {
-    fn to_offset<'a,Em : Embed>(v: OptRef<'a,Self>,tr: Transf<Em>) -> (Singleton,Transf<Em>) {
-        let (tp,ntr) = match v.as_ref() {
-            &BitVecValue::BoolValue(w) => {
-                let f = move |_:&[Em::Expr],_:usize,e: Em::Expr,em: &mut Em| {
-                    let zero = em.const_bitvec(w,BigUint::from(0 as u8))?;
-                    let one  = em.const_bitvec(w,BigUint::from(1 as u8))?;
-                    em.ite(e,one,zero)
-                };
-                (Sort::from_kind(SortKind::BitVec(w)),
-                 Transformation::map_by_elem(Box::new(f),tr))
-            },
-            &BitVecValue::BitVecValue(w) => (Sort::from_kind(SortKind::BitVec(w)),tr)
-        };
-        (Singleton(tp),ntr)
+impl<'a> IntValue<'a> for BitVecValue {
+    fn const_int<Em: Embed>(bw: u64,val: BigUint,res: &mut Vec<Em::Expr>,em: &mut Em)
+                            -> Result<Self,Em::Error> {
+        if bw==1 {
+            let el = em.const_bool(val==BigUint::from(1u8))?;
+            res.push(el);
+            Ok(BitVecValue::BoolValue(1))
+        } else {
+            let el = em.const_bitvec(bw as usize,val)?;
+            Ok(BitVecValue::BitVecValue(bw as usize))
+        }
     }
-    fn from_offset<'a,Em : Embed>(bw: usize,tp: &Singleton,inp: Transf<Em>)
-                                  -> (Self,Transf<Em>) {
-        match tp.0.kind() {
-            SortKind::Bool => (BitVecValue::BoolValue(bw),inp),
+    fn bin<From1,P1: Path<'a,Em,From1,To=Self>,
+           From2,P2: Path<'a,Em,From2,To=Self>,
+           Em: DeriveValues>(op: &llvm_ir::BinOp,
+                             lhs: &P1,
+                             lfrom: &From1,
+                             larr: &[Em::Expr],
+                             rhs: &P2,
+                             rfrom: &From2,
+                             rarr: &[Em::Expr],
+                             res: &mut Vec<Em::Expr>,
+                             em: &mut Em)
+                             -> Result<Self,Em::Error> {
+        match op {
+            &llvm_ir::BinOp::Add(_,_)
+                => Self::bv_op(lhs,lfrom,larr,
+                               rhs,rfrom,rarr,
+                               res,em,|x,y,em| em.bvadd(x,y)),
+            &llvm_ir::BinOp::Sub(_,_)
+                => Self::bv_op(lhs,lfrom,larr,
+                               rhs,rfrom,rarr,
+                               res,em,|x,y,em| em.bvsub(x,y)),
+            &llvm_ir::BinOp::Mul(_,_)
+                => Self::bv_op(lhs,lfrom,larr,
+                               rhs,rfrom,rarr,
+                               res,em,|x,y,em| em.bvmul(x,y)),
+            &llvm_ir::BinOp::XOr
+                => Self::op(lhs,lfrom,larr,
+                            rhs,rfrom,rarr,
+                            res,em,
+                            |x,y,em| em.xor(vec![x,y]),
+                            |x,y,em| em.bvxor(x,y)),
+            &llvm_ir::BinOp::AShr
+                => Self::bv_op(lhs,lfrom,larr,
+                               rhs,rfrom,rarr,
+                               res,em,|x,y,em| em.bvashr(x,y)),
+            &llvm_ir::BinOp::LShr
+                => Self::bv_op(lhs,lfrom,larr,
+                               rhs,rfrom,rarr,
+                               res,em,|x,y,em| em.bvlshr(x,y)),
+            &llvm_ir::BinOp::SDiv(_)
+                => Self::bv_op(lhs,lfrom,larr,
+                               rhs,rfrom,rarr,
+                               res,em,|x,y,em| em.bvsdiv(x,y)),
+            &llvm_ir::BinOp::And
+                => Self::op(lhs,lfrom,larr,
+                            rhs,rfrom,rarr,
+                            res,em,
+                            |x,y,em| em.and(vec![x,y]),
+                            |x,y,em| em.bvand(x,y)),
+            &llvm_ir::BinOp::Or
+                => Self::op(lhs,lfrom,larr,
+                            rhs,rfrom,rarr,
+                            res,em,
+                            |x,y,em| em.or(vec![x,y]),
+                            |x,y,em| em.bvor(x,y)),
+            &llvm_ir::BinOp::Shl
+                => Self::bv_op(lhs,lfrom,larr,
+                               rhs,rfrom,rarr,
+                               res,em,|x,y,em| em.bvshl(x,y)),
+            _ => panic!("BinOp: {:?}",op)
+        }
+    }
+    fn sext<From,P: Path<'a,Em,From,To=Self>,
+            Em: Embed>(path: &P,
+                       from: &From,
+                       arr: &[Em::Expr],
+                       bw: usize,
+                       res: &mut Vec<Em::Expr>,
+                       em: &mut Em)
+                       -> Result<Self,Em::Error> {
+        let val = path.read(from,0,arr,em)?;
+        match path.get(from) {
+            &BitVecValue::BoolValue(sz) => {
+                assert!(bw>=sz);
+                res.push(val);
+                Ok(BitVecValue::BoolValue(bw))
+            },
+            &BitVecValue::BitVecValue(sz) => {
+                assert!(bw>=sz);
+                let bv0  = em.const_bitvec(sz,BigUint::from(0u8))?;
+                let sign = em.extract(sz-1,1,val.clone())?;
+                let rest = em.extract(0,sz-1,val.clone())?;
+                let pad0 = em.const_bitvec(bw-sz,BigUint::from(0u8))?;
+                let pad1 = em.const_bitvec(bw-sz,BigUint::from(1u8).shl(bw-sz)-1u8)?;
+                let pad_cond = em.bvsge(val,bv0)?;
+                let pad  = em.ite(pad_cond,pad0,pad1)?;
+                let outp1 = em.concat(sign,pad)?;
+                let outp2 = em.concat(outp1,rest)?;
+                res.push(outp2);
+                Ok(BitVecValue::BitVecValue(bw))
+            }
+        }
+    }
+    fn zext<From,P: Path<'a,Em,From,To=Self>,
+            Em: Embed>(path: &P,
+                       from: &From,
+                       arr: &[Em::Expr],
+                       bw: usize,
+                       res: &mut Vec<Em::Expr>,
+                       em: &mut Em)
+                       -> Result<Self,Em::Error> {
+        let val = path.read(from,0,arr,em)?;
+        match path.get(from) {
+            &BitVecValue::BoolValue(sz) => {
+                assert!(bw>=sz);
+                res.push(val);
+                Ok(BitVecValue::BoolValue(bw))
+            },
+            &BitVecValue::BitVecValue(sz) => {
+                let pad = em.const_bitvec(bw-sz,BigUint::from(0u8))?;
+                let outp = em.concat(pad,val)?;
+                Ok(BitVecValue::BitVecValue(bw))
+            }
+        }
+    }
+    fn trunc<From,P: Path<'a,Em,From,To=Self>,
+             Em: Embed>(path: &P,
+                        from: &From,
+                        arr: &[Em::Expr],
+                        bw: usize,
+                        res: &mut Vec<Em::Expr>,
+                        em: &mut Em)
+                        -> Result<Self,Em::Error> {
+        let val = path.read(from,0,arr,em)?;
+        match path.get(from) {
+            &BitVecValue::BoolValue(sz) => {
+                assert!(bw<=sz);
+                res.push(val);
+                Ok(BitVecValue::BoolValue(bw))
+            },
+            &BitVecValue::BitVecValue(sz) => {
+                assert!(bw<=sz);
+                let outp = em.extract(0,bw,val)?;
+                res.push(outp);
+                Ok(BitVecValue::BitVecValue(bw))
+            }
+        }
+    }
+    fn icmp<From1,P1: Path<'a,Em,From1,To=Self>,
+            From2,P2: Path<'a,Em,From2,To=Self>,
+            Em: Embed>(op: &llvm_ir::CmpOp,
+                       pl: &P1,froml: &From1,arrl: &[Em::Expr],
+                       pr: &P2,fromr: &From2,arrr: &[Em::Expr],
+                       em: &mut Em)
+                       -> Result<Em::Expr,Em::Error> {
+        match op {
+            &llvm_ir::CmpOp::Eq => Self::cmp(pl,froml,arrl,
+                                             pr,fromr,arrr,
+                                             em,
+                                             |x,y,em| em.eq(x,y),
+                                             |x,y,em| em.eq(x,y)),
+            &llvm_ir::CmpOp::Ne => {
+                let eq = Self::cmp(pl,froml,arrl,
+                                   pr,fromr,arrr,
+                                   em,
+                                   |x,y,em| em.eq(x,y),
+                                   |x,y,em| em.eq(x,y))?;
+                em.not(eq)
+            },
+            &llvm_ir::CmpOp::SGe => Self::cmp_bv(pl,froml,arrl,
+                                                 pr,fromr,arrr,
+                                                 em,|x,y,em| em.bvsge(x,y)),
+            &llvm_ir::CmpOp::SGe => Self::cmp_bv(pl,froml,arrl,
+                                                 pr,fromr,arrr,
+                                                 em,|x,y,em| em.bvuge(x,y)),
+            &llvm_ir::CmpOp::SGt => Self::cmp_bv(pl,froml,arrl,
+                                                 pr,fromr,arrr,
+                                                 em,|x,y,em| em.bvsgt(x,y)),
+            &llvm_ir::CmpOp::UGt => Self::cmp_bv(pl,froml,arrl,
+                                                 pr,fromr,arrr,
+                                                 em,|x,y,em| em.bvugt(x,y)),
+            &llvm_ir::CmpOp::SLt => Self::cmp_bv(pl,froml,arrl,
+                                                 pr,fromr,arrr,
+                                                 em,|x,y,em| em.bvslt(x,y)),
+            &llvm_ir::CmpOp::ULt => Self::cmp_bv(pl,froml,arrl,
+                                                 pr,fromr,arrr,
+                                                 em,|x,y,em| em.bvult(x,y)),
+            _ => panic!("ICmp {:?} not implemented",op)
+        }
+    }
+    fn from_bool<Em: Embed>(e: Em::Expr,
+                            res: &mut Vec<Em::Expr>,
+                            _: &mut Em)
+                            -> Result<Self,Em::Error> {
+        res.push(e);
+        Ok(BitVecValue::BoolValue(1))
+    }
+    fn to_bool<From,P: Path<'a,Em,From,To=Self>,
+               Em: Embed>(path: &P,
+                          from: &From,
+                          arr: &[Em::Expr],
+                          em: &mut Em)
+                          -> Result<Em::Expr,Em::Error> {
+        let val = path.read(from,0,arr,em)?;
+        match path.get(from) {
+            &BitVecValue::BoolValue(_) => Ok(val),
+            &BitVecValue::BitVecValue(bw) => {
+                let zero = em.const_bitvec(bw,BigUint::from(0u8))?;
+                let eq = em.eq(val,zero)?;
+                em.not(eq)
+            }
+        }
+    }
+    fn to_offset<From,P: Path<'a,Em,From,To=Self>,
+                 Em: Embed>(path: &P,
+                            from: &From,
+                            arr: &[Em::Expr],
+                            res: &mut Vec<Em::Expr>,
+                            em: &mut Em)
+                            -> Result<Singleton,Em::Error> {
+        let w = path.get(from).bitwidth();
+        let val = Self::as_bitvec(path,from,arr,em)?;
+        res.push(val);
+        Ok(Singleton(Sort::from_kind(SortKind::BitVec(w))))
+    }
+    fn from_offset<From,P: Path<'a,Em,From,To=Singleton>,
+                   Em: Embed>(bw: usize,
+                              path: &P,
+                              from: &From,
+                              arr: &[Em::Expr],
+                              res: &mut Vec<Em::Expr>,
+                              em: &mut Em)
+                              -> Result<Self,Em::Error> {
+        let val = path.read(from,0,arr,em)?;
+        match path.get(from).0.kind() {
+            SortKind::Bool => {
+                res.push(val);
+                Ok(BitVecValue::BoolValue(bw))
+            },
             SortKind::BitVec(w) => {
                 assert_eq!(w,bw);
-                (BitVecValue::BitVecValue(w),inp)
+                res.push(val);
+                Ok(BitVecValue::BitVecValue(bw))
             },
             _ => unimplemented!()
         }
     }
-    fn const_int<Em : Embed>(bw: u64,val: BigUint,em: &mut Em) -> Result<(BitVecValue,Vec<Em::Expr>),Em::Error> {
-        if val==BigUint::from(0 as u8) || val==BigUint::from(1 as u8) {
-            let el = em.const_bool(val==BigUint::from(1 as u8))?;
-            Ok((BitVecValue::BoolValue(bw as usize),
-                vec![el]))
-        } else {
-            let el = em.const_bitvec(bw as usize,val)?;
-            Ok((BitVecValue::BitVecValue(bw as usize),
-                vec![el]))
-        }
-    }
-    fn bin<'b,Em>(op: &llvm_ir::BinOp,
-                  lhs: &BitVecValue,
-                  rhs: &BitVecValue,
-                  inp_l: Transf<Em>,
-                  inp_r: Transf<Em>,
-                  _: &[Em::Expr],
-                  _: &mut Em)
-                  -> Result<(BitVecValue,Transf<Em>),Em::Error>
-        where Em : DeriveValues {
-        match op {
-            &llvm_ir::BinOp::Add(_,_) => match *lhs {
-                BitVecValue::BoolValue(sz1) => match *rhs {
-                    BitVecValue::BoolValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            let rlhs = em.ite(lhs[0].clone(),bv1.clone(),bv0.clone())?;
-                            let rrhs = em.ite(rhs[0].clone(),bv1,bv0)?;
-                            arr.push(em.bvadd(rlhs,rrhs)?);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    },
-                    BitVecValue::BitVecValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            let rlhs = em.ite(lhs[0].clone(),bv1,bv0)?;
-                            arr.push(em.bvadd(rlhs,rhs[0].clone())?);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    }
-                },
-                BitVecValue::BitVecValue(sz1) => match *rhs {
-                    BitVecValue::BoolValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            let rrhs = em.ite(rhs[0].clone(),bv1,bv0)?;
-                            arr.push(em.bvadd(lhs[0].clone(),rrhs)?);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    },
-                    BitVecValue::BitVecValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            arr.push(em.bvadd(lhs[0].clone(),rhs[0].clone())?);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    }
-                }
-            },
-            &llvm_ir::BinOp::Sub(_,_) => match *lhs {
-                BitVecValue::BoolValue(sz1) => match *rhs {
-                    BitVecValue::BoolValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            let rlhs = em.ite(lhs[0].clone(),bv1.clone(),bv0.clone())?;
-                            let rrhs = em.ite(rhs[0].clone(),bv1,bv0)?;
-                            arr.push(em.bvsub(rlhs,rrhs)?);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    },
-                    BitVecValue::BitVecValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            let rlhs = em.ite(lhs[0].clone(),bv1,bv0)?;
-                            arr.push(em.bvsub(rlhs,rhs[0].clone())?);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    }
-                },
-                BitVecValue::BitVecValue(sz1) => match *rhs {
-                    BitVecValue::BoolValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            let rrhs = em.ite(rhs[0].clone(),bv1,bv0)?;
-                            arr.push(em.bvsub(lhs[0].clone(),rrhs)?);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    },
-                    BitVecValue::BitVecValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            arr.push(em.bvsub(lhs[0].clone(),rhs[0].clone())?);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    }
-                }
-            },
-            &llvm_ir::BinOp::Mul(_,_) => match *lhs {
-                BitVecValue::BoolValue(sz1) => match *rhs {
-                    BitVecValue::BoolValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            arr.push(em.or(vec![lhs[0].clone(),rhs[0].clone()])?);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    },
-                    BitVecValue::BitVecValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            arr.push(em.ite(lhs[0].clone(),rhs[0].clone(),bv0)?);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    }
-                },
-                BitVecValue::BitVecValue(sz1) => match *rhs {
-                    BitVecValue::BoolValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            arr.push(em.ite(rhs[0].clone(),lhs[0].clone(),bv0)?);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    },
-                    BitVecValue::BitVecValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            arr.push(em.bvmul(lhs[0].clone(),rhs[0].clone())?);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    }
-                }
-            },
-            &llvm_ir::BinOp::XOr => match *lhs {
-                BitVecValue::BoolValue(sz1) => match *rhs {
-                    BitVecValue::BoolValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            arr.push(em.xor(vec![lhs[0].clone(),rhs[0].clone()])?);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BoolValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    },
-                    BitVecValue::BitVecValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            let nlhs = em.ite(lhs[0].clone(),bv1,bv0)?;
-                            let res = em.bvxor(nlhs,rhs[0].clone())?;
-                            arr.push(res);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    }
-                },
-                BitVecValue::BitVecValue(sz1) => match *rhs {
-                    BitVecValue::BoolValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            let nrhs = em.ite(rhs[0].clone(),bv1,bv0)?;
-                            let res = em.bvxor(lhs[0].clone(),nrhs)?;
-                            arr.push(res);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    },
-                    BitVecValue::BitVecValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            arr.push(em.bvxor(lhs[0].clone(),rhs[0].clone())?);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    }
-                }
-            },
-            &llvm_ir::BinOp::AShr => match *lhs {
-                BitVecValue::BoolValue(sz1) => match *rhs {
-                    BitVecValue::BoolValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let nr = em.not(rhs[0].clone())?;
-                            let res = em.and(vec![nr,
-                                                  lhs[0].clone()])?;
-                            arr.push(res);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BoolValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    },
-                    BitVecValue::BitVecValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            let nlhs = em.ite(lhs[0].clone(),bv1,bv0)?;
-                            let res = em.bvashr(nlhs,rhs[0].clone())?;
-                            arr.push(res);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    }
-                },
-                BitVecValue::BitVecValue(sz1) => match *rhs {
-                    BitVecValue::BoolValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            let nrhs = em.ite(rhs[0].clone(),bv1,bv0)?;
-                            let res = em.bvashr(lhs[0].clone(),nrhs)?;
-                            arr.push(res);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    },
-                    BitVecValue::BitVecValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            arr.push(em.bvashr(lhs[0].clone(),rhs[0].clone())?);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    }
-                }
-            },
-            &llvm_ir::BinOp::LShr => match *lhs {
-                BitVecValue::BoolValue(sz1) => match *rhs {
-                    BitVecValue::BoolValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let nr = em.not(rhs[0].clone())?;
-                            let res = em.and(vec![nr,
-                                                  lhs[0].clone()])?;
-                            arr.push(res);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BoolValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    },
-                    BitVecValue::BitVecValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            let nlhs = em.ite(lhs[0].clone(),bv1,bv0)?;
-                            let res = em.bvlshr(nlhs,rhs[0].clone())?;
-                            arr.push(res);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    }
-                },
-                BitVecValue::BitVecValue(sz1) => match *rhs {
-                    BitVecValue::BoolValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            let nrhs = em.ite(rhs[0].clone(),bv1,bv0)?;
-                            let res = em.bvlshr(lhs[0].clone(),nrhs)?;
-                            arr.push(res);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    },
-                    BitVecValue::BitVecValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            arr.push(em.bvlshr(lhs[0].clone(),rhs[0].clone())?);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    }
-                }
-            },
-            &llvm_ir::BinOp::SDiv(_) => match *lhs {
-                BitVecValue::BoolValue(sz1) => match *rhs {
-                    BitVecValue::BoolValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        Ok((BitVecValue::BoolValue(sz1),
-                            inp_l))
-                    },
-                    BitVecValue::BitVecValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            let nlhs = em.ite(lhs[0].clone(),bv1,bv0)?;
-                            let res = em.bvsdiv(nlhs,rhs[0].clone())?;
-                            arr.push(res);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    }
-                },
-                BitVecValue::BitVecValue(sz1) => match *rhs {
-                    BitVecValue::BoolValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            let nrhs = em.ite(rhs[0].clone(),bv1,bv0)?;
-                            let res = em.bvsdiv(lhs[0].clone(),nrhs)?;
-                            arr.push(res);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    },
-                    BitVecValue::BitVecValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            arr.push(em.bvsdiv(lhs[0].clone(),rhs[0].clone())?);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    }
-                }
-            },
-            &llvm_ir::BinOp::And => match *lhs {
-                BitVecValue::BoolValue(sz1) => match *rhs {
-                    BitVecValue::BoolValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let res = em.and(vec![lhs[0].clone(),
-                                                  rhs[0].clone()])?;
-                            arr.push(res);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BoolValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    },
-                    BitVecValue::BitVecValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            let nlhs = em.ite(lhs[0].clone(),bv1,bv0)?;
-                            let res = em.bvand(nlhs,rhs[0].clone())?;
-                            arr.push(res);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    }
-                },
-                BitVecValue::BitVecValue(sz1) => match *rhs {
-                    BitVecValue::BoolValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            let nrhs = em.ite(rhs[0].clone(),bv1,bv0)?;
-                            let res = em.bvand(lhs[0].clone(),nrhs)?;
-                            arr.push(res);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    },
-                    BitVecValue::BitVecValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            arr.push(em.bvand(lhs[0].clone(),rhs[0].clone())?);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    }
-                }
-            },
-            &llvm_ir::BinOp::Or => match *lhs {
-                BitVecValue::BoolValue(sz1) => match *rhs {
-                    BitVecValue::BoolValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let res = em.or(vec![lhs[0].clone(),
-                                                 rhs[0].clone()])?;
-                            arr.push(res);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BoolValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    },
-                    BitVecValue::BitVecValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            let nlhs = em.ite(lhs[0].clone(),bv1,bv0)?;
-                            let res = em.bvor(nlhs,rhs[0].clone())?;
-                            arr.push(res);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    }
-                },
-                BitVecValue::BitVecValue(sz1) => match *rhs {
-                    BitVecValue::BoolValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            let nrhs = em.ite(rhs[0].clone(),bv1,bv0)?;
-                            let res = em.bvor(lhs[0].clone(),nrhs)?;
-                            arr.push(res);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    },
-                    BitVecValue::BitVecValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            arr.push(em.bvor(lhs[0].clone(),rhs[0].clone())?);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    }
-                }
-            },
-            &llvm_ir::BinOp::Shl => match *lhs {
-                BitVecValue::BoolValue(sz1) => match *rhs {
-                    BitVecValue::BoolValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            let rl = em.ite(lhs[0].clone(),bv1.clone(),bv0.clone())?;
-                            let rr = em.ite(rhs[0].clone(),bv1.clone(),bv0.clone())?;
-                            let res = em.bvshl(rl,rr)?;
-                            arr.push(res);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    },
-                    BitVecValue::BitVecValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            let nlhs = em.ite(lhs[0].clone(),bv1,bv0)?;
-                            let res = em.bvshl(nlhs,rhs[0].clone())?;
-                            arr.push(res);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    }
-                },
-                BitVecValue::BitVecValue(sz1) => match *rhs {
-                    BitVecValue::BoolValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            let bv0 = em.const_bitvec(sz1,BigUint::from(0 as u8))?;
-                            let bv1 = em.const_bitvec(sz1,BigUint::from(1 as u8))?;
-                            let nrhs = em.ite(rhs[0].clone(),bv1,bv0)?;
-                            let res = em.bvshl(lhs[0].clone(),nrhs)?;
-                            arr.push(res);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    },
-                    BitVecValue::BitVecValue(sz2) => {
-                        assert_eq!(sz1,sz2);
-                        let f = move |lhs : &[Em::Expr],rhs : &[Em::Expr],arr : &mut Vec<Em::Expr>,em : &mut Em| {
-                            arr.push(em.bvshl(lhs[0].clone(),rhs[0].clone())?);
-                            Ok(())
-                        };
-                        Ok((BitVecValue::BitVecValue(sz1),
-                            Transformation::zip2(1,Box::new(f),inp_l,inp_r)))
-                    }
-                }
-            },
-            _ => panic!("BinOp: {:?}",op)
-        }
-    }
-    fn sext<'a,Em>(val: OptRef<'a,Self>,inp: Transf<Em>,sz: usize,em: &mut Em)
-                   -> (OptRef<'a,Self>,Transf<Em>)
-        where Em : Embed {
-        match val.as_ref() {
-            &BitVecValue::BoolValue(_)
-                => (OptRef::Owned(BitVecValue::BoolValue(sz)),inp),
-            &BitVecValue::BitVecValue(bw) => {
-                let ninp = Transformation::map_by_elem(Box::new(
-                    move |_,_,e: Em::Expr,em: &mut Em| {
-                        let bv0  = em.const_bitvec(bw,BigUint::from(0 as u8))?;
-                        let sign = em.extract(bw-1,1,e.clone())?;
-                        let rest = em.extract(0,bw-1,e.clone())?;
-                        let pad0 = em.const_bitvec(sz-bw,BigUint::from(0 as u8))?;
-                        let pad1 = em.const_bitvec(sz-bw,BigUint::from(1 as u8).shl(sz-bw)-(1 as u8))?;
-                        let pad_cond = em.bvsge(e,bv0)?;
-                        let pad  = em.ite(pad_cond,pad0,pad1)?;
-                        let res1 = em.concat(sign,pad)?;
-                        let res2 = em.concat(res1,rest)?;
-                        Ok(res2)
-                    }),inp);
-                (OptRef::Owned(BitVecValue::BitVecValue(sz)),ninp)
-            }
-        }
-    }
-    fn zext<'a,Em>(val: OptRef<'a,Self>,inp: Transf<Em>,sz: usize,em: &mut Em)
-                   -> (OptRef<'a,Self>,Transf<Em>)
-        where Em : Embed {
-        match val.as_ref() {
-            &BitVecValue::BoolValue(_)
-                => (OptRef::Owned(BitVecValue::BoolValue(sz)),inp),
-            &BitVecValue::BitVecValue(bw) => {
-                let ninp = Transformation::map_by_elem(Box::new(
-                    move |_,_,e: Em::Expr,em: &mut Em| {
-                        let pad = em.const_bitvec(sz-bw,BigUint::from(0 as u8))?;
-                        Ok(em.concat(pad,e)?)
-                    }),inp);
-                (OptRef::Owned(BitVecValue::BitVecValue(sz)),ninp)
-            }
-        }
-    }
-    fn trunc<'a,Em>(val: OptRef<'a,Self>,inp: Transf<Em>,sz: usize,em: &mut Em)
-                   -> (OptRef<'a,Self>,Transf<Em>)
-        where Em : Embed {
-        match val.as_ref() {
-            &BitVecValue::BoolValue(_)
-                => (OptRef::Owned(BitVecValue::BoolValue(sz)),inp),
-            &BitVecValue::BitVecValue(bw) => {
-                let ninp = Transformation::map_by_elem(Box::new(
-                    move |_,_,e: Em::Expr,em: &mut Em| {
-                        em.extract(0,sz,e)
-                    }),inp);
-                (OptRef::Owned(BitVecValue::BitVecValue(sz)),ninp)
-            }
-        }
-    }
-    fn icmp<Em>(op: &llvm_ir::CmpOp,
-                lhs: &Self,lhs_inp: Transf<Em>,
-                rhs: &Self,rhs_inp: Transf<Em>,
-                em: &mut Em)
-                -> Result<Transf<Em>,Em::Error>
-        where Em : Embed {
-        match lhs {
-            &BitVecValue::BoolValue(_) => match rhs {
-                &BitVecValue::BoolValue(_) => {
-                    let f : Box<for <'b,'c> Fn(&'b [Em::Expr], &'c mut Em) -> Result<Em::Expr, Em::Error>> = match op {
-                        &llvm_ir::CmpOp::Eq => Box::new(|es: &[Em::Expr],em: &mut Em| {
-                            em.eq(es[0].clone(),es[1].clone())
-                        }),
-                        &llvm_ir::CmpOp::Ne => Box::new(|es: &[Em::Expr],em: &mut Em| {
-                            let eq = em.eq(es[0].clone(),es[1].clone())?;
-                            em.not(eq)
-                        }),
-                        &llvm_ir::CmpOp::SGe |
-                        &llvm_ir::CmpOp::UGe => Box::new(|es: &[Em::Expr],em: &mut Em| {
-                            let n = em.not(es[1].clone())?;
-                            em.or(vec![es[0].clone(),n])
-                        }),
-                        &llvm_ir::CmpOp::SGt |
-                        &llvm_ir::CmpOp::UGt => Box::new(|es: &[Em::Expr],em: &mut Em| {
-                            let n = em.not(es[1].clone())?;
-                            em.and(vec![es[0].clone(),n])
-                        }),
-                        &llvm_ir::CmpOp::SLt |
-                        &llvm_ir::CmpOp::ULt => Box::new(|es: &[Em::Expr],em: &mut Em| {
-                            let n = em.not(es[0].clone())?;
-                            em.and(vec![n,es[1].clone()])
-                        }),
-                        _ => panic!("ICmp {:?} not implemented",op)
-                    };
-                    Ok(Transformation::zips_by_elem(f,vec![lhs_inp,rhs_inp]))
-                },
-                &BitVecValue::BitVecValue(bw) => {
-                    let f : Box<for <'b,'c> Fn(&'b [Em::Expr], &'c mut Em) -> Result<Em::Expr, Em::Error>> = match op {
-                        &llvm_ir::CmpOp::Eq => Box::new(move |es: &[Em::Expr],em: &mut Em| {
-                            let one = em.const_bitvec(bw,BigUint::from(1 as u8))?;
-                            let zero = em.const_bitvec(bw,BigUint::from(0 as u8))?;
-                            let l = em.ite(es[0].clone(),one,zero)?;
-                            em.eq(l,es[1].clone())
-                        }),
-                        &llvm_ir::CmpOp::Ne => Box::new(move |es: &[Em::Expr],em: &mut Em| {
-                            let one = em.const_bitvec(bw,BigUint::from(1 as u8))?;
-                            let zero = em.const_bitvec(bw,BigUint::from(0 as u8))?;
-                            let l = em.ite(es[0].clone(),one,zero)?;
-                            let eq = em.eq(l,es[1].clone())?;
-                            em.not(eq)
-                        }),
-                        &llvm_ir::CmpOp::SGe => Box::new(move |es: &[Em::Expr],em: &mut Em| {
-                            let one = em.const_bitvec(bw,BigUint::from(1 as u8))?;
-                            let zero = em.const_bitvec(bw,BigUint::from(0 as u8))?;
-                            let l = em.ite(es[0].clone(),one,zero)?;
-                            em.bvsge(l,es[1].clone())
-                        }),
-                        &llvm_ir::CmpOp::SLt => Box::new(move |es: &[Em::Expr],em: &mut Em| {
-                            let one = em.const_bitvec(bw,BigUint::from(1 as u8))?;
-                            let zero = em.const_bitvec(bw,BigUint::from(0 as u8))?;
-                            let l = em.ite(es[0].clone(),one,zero)?;
-                            em.bvslt(l,es[1].clone())
-                        }),
-                        &llvm_ir::CmpOp::SLe => Box::new(move |es: &[Em::Expr],em: &mut Em| {
-                            let one = em.const_bitvec(bw,BigUint::from(1 as u8))?;
-                            let zero = em.const_bitvec(bw,BigUint::from(0 as u8))?;
-                            let l = em.ite(es[0].clone(),one,zero)?;
-                            em.bvsle(l,es[1].clone())
-                        }),
-                        _ => panic!("ICmp {:?} not implemented",op)
-                    };
-                    Ok(Transformation::zips_by_elem(f,vec![lhs_inp,rhs_inp]))
-                }
-            },
-            &BitVecValue::BitVecValue(bwl) => match rhs {
-                &BitVecValue::BitVecValue(bwr) => {
-                    debug_assert_eq!(bwl,bwr);
-                    let f : Box<for <'b,'c> Fn(&'b [Em::Expr], &'c mut Em) -> Result<Em::Expr, Em::Error>> = match op {
-                        &llvm_ir::CmpOp::Eq => Box::new(|es: &[Em::Expr],em: &mut Em| {
-                            em.eq(es[0].clone(),es[1].clone())
-                        }),
-                        &llvm_ir::CmpOp::Ne => Box::new(|es: &[Em::Expr],em: &mut Em| {
-                            let eq = em.eq(es[0].clone(),es[1].clone())?;
-                            em.not(eq)
-                        }),
-                        &llvm_ir::CmpOp::SGe => Box::new(|es: &[Em::Expr],em: &mut Em| {
-                            em.bvsge(es[0].clone(),es[1].clone())
-                        }),
-                        &llvm_ir::CmpOp::SGt => Box::new(|es: &[Em::Expr],em: &mut Em| {
-                            em.bvsgt(es[0].clone(),es[1].clone())
-                        }),
-                        &llvm_ir::CmpOp::SLe => Box::new(|es: &[Em::Expr],em: &mut Em| {
-                            em.bvsle(es[0].clone(),es[1].clone())
-                        }),
-                        &llvm_ir::CmpOp::SLt => Box::new(|es: &[Em::Expr],em: &mut Em| {
-                            em.bvslt(es[0].clone(),es[1].clone())
-                        }),
-                        _ => panic!("ICmp {:?} not implemented",op)
-                    };
-                    Ok(Transformation::zips_by_elem(f,vec![lhs_inp,rhs_inp]))
-                },
-                &BitVecValue::BoolValue(bwr) => {
-                    debug_assert_eq!(bwl,bwr);
-                    let f : Box<for <'b,'c> Fn(&'b [Em::Expr], &'c mut Em) -> Result<Em::Expr, Em::Error>> = match op {
-                        &llvm_ir::CmpOp::Eq => Box::new(move |es: &[Em::Expr],em: &mut Em| {
-                            let one = em.const_bitvec(bwl,BigUint::from(1 as u8))?;
-                            let zero = em.const_bitvec(bwl,BigUint::from(0 as u8))?;
-                            let r = em.ite(es[1].clone(),one,zero)?;
-                            em.eq(es[0].clone(),r)
-                        }),
-                        &llvm_ir::CmpOp::Ne => Box::new(move |es: &[Em::Expr],em: &mut Em| {
-                            let one = em.const_bitvec(bwl,BigUint::from(1 as u8))?;
-                            let zero = em.const_bitvec(bwl,BigUint::from(0 as u8))?;
-                            let r = em.ite(es[1].clone(),one,zero)?;
-                            let eq = em.eq(es[0].clone(),r)?;
-                            em.not(eq)
-                        }),
-                        &llvm_ir::CmpOp::SGe => Box::new(move |es: &[Em::Expr],em: &mut Em| {
-                            let one = em.const_bitvec(bwl,BigUint::from(1 as u8))?;
-                            let zero = em.const_bitvec(bwl,BigUint::from(0 as u8))?;
-                            let r = em.ite(es[1].clone(),one,zero)?;
-                            em.bvsge(es[0].clone(),r)
-                        }),
-                        &llvm_ir::CmpOp::SGt => Box::new(move |es: &[Em::Expr],em: &mut Em| {
-                            let one = em.const_bitvec(bwl,BigUint::from(1 as u8))?;
-                            let zero = em.const_bitvec(bwl,BigUint::from(0 as u8))?;
-                            let r = em.ite(es[1].clone(),one,zero)?;
-                            em.bvsgt(es[0].clone(),r)
-                        }),
-                        _ => panic!("ICmp {:?} not implemented",op)
-                    };
-                    Ok(Transformation::zips_by_elem(f,vec![lhs_inp,rhs_inp]))
-                }
-            }
-        }
-    }
-    fn from_bool<Em : Embed>(v: Transf<Em>) -> Result<(Self,Transf<Em>),Em::Error> {
-        Ok((BitVecValue::BoolValue(1),v))
-    }
-    fn to_bool<'a,Em : Embed>(val: OptRef<'a,Self>,inp: Transf<Em>) -> Result<Transf<Em>,Em::Error> {
-        match val.as_ref() {
-            &BitVecValue::BoolValue(_) => Ok(inp),
-            &BitVecValue::BitVecValue(bw) => {
-                let f = move |_:&[Em::Expr],_:usize,e: Em::Expr,em: &mut Em| {
-                    let zero = em.const_bitvec(bw,BigUint::from(0 as u8))?;
-                    let eq = em.eq(e,zero)?;
-                    em.not(eq)
-                };
-                let r = Transformation::map_by_elem(Box::new(f),inp);
-                Ok(r)
-            }
-        }
-    }
 }
 
-impl Bytes for BitVecValue {
+impl<'a> Bytes<'a> for BitVecValue {
     fn byte_width(&self) -> usize {
         match self {
             &BitVecValue::BoolValue(sz) => sz/8,
             &BitVecValue::BitVecValue(sz) => sz/8
         }
     }
-    fn extract_bytes<'a,Em : Embed>(v: OptRef<'a,Self>,inp_v: Transf<Em>,start: usize,len: usize,em: &mut Em)
-                                    -> Result<Option<(OptRef<'a,Self>,Transf<Em>)>,Em::Error> {
-        match v.as_ref() {
+    fn extract_bytes<Em: Embed,From,P: Path<'a,Em,From,To=Self>>(
+        path: &P,from: &From,arr: &[Em::Expr],
+        start: usize,len: usize,
+        res: &mut Vec<Em::Expr>,
+        em: &mut Em
+    ) -> Result<Option<Self>,Em::Error> {
+        match path.get(from) {
             &BitVecValue::BoolValue(sz) => {
                 let rsz = sz/8;
                 if start+len==rsz {
-                    Ok(Some((OptRef::Owned(BitVecValue::BoolValue(len*8)),inp_v)))
+                    let val = path.read(from,0,arr,em)?;
+                    res.push(val);
                 } else {
-                    let ninp = Transformation::const_bool(false,em)?;
-                    Ok(Some((OptRef::Owned(BitVecValue::BoolValue(len*8)),ninp)))
+                    let outp = em.const_bool(false)?;
+                    res.push(outp);
                 }
+                Ok(Some(BitVecValue::BoolValue(len*8)))
             },
             &BitVecValue::BitVecValue(_) => {
                 //let rsz = sz/8;
@@ -2747,26 +2508,7 @@ impl Bytes for BitVecValue {
     }
 }
 
-/*impl<Ptr,V> CompValue<Ptr,V> {
-    pub fn lower<'a>(x: OptRef<'a,Self>) -> CompValue<OptRef<'a,BitField<Ptr>>,OptRef<'a,V>> {
-        match x {
-            OptRef::Owned(CompValue::Value(v))
-                => CompValue::Value(OptRef::Owned(v)),
-            OptRef::Owned(CompValue::Pointer(p))
-                => CompValue::Pointer(OptRef::Owned(p)),
-            OptRef::Owned(CompValue::Vector(mut v))
-                => CompValue::Vector(v.drain(..).map(|x| CompValue::lower(OptRef::Owned(x))).collect()),
-            OptRef::Ref(&CompValue::Value(ref v))
-                => CompValue::Value(OptRef::Ref(v)),
-            OptRef::Ref(&CompValue::Pointer(ref p))
-                => CompValue::Pointer(OptRef::Ref(p)),
-            OptRef::Ref(&CompValue::Vector(ref v))
-                => CompValue::Vector(v.iter().map(|x| CompValue::lower(OptRef::Ref(x))).collect()),
-        }
-    }
-}*/
-
-impl<Ptr : HasSorts,V : HasSorts> HasSorts for CompValue<Ptr,V> {
+impl<Ptr: HasSorts,V: HasSorts> HasSorts for CompValue<Ptr,V> {
     fn num_elem(&self) -> usize {
         match self {
             &CompValue::Value(ref v) => v.num_elem(),
@@ -2786,118 +2528,64 @@ impl<Ptr : HasSorts,V : HasSorts> HasSorts for CompValue<Ptr,V> {
     }
 }
 
-impl<Ptr : Composite+Clone,V : Composite+Clone> Composite for CompValue<Ptr,V> {
-    fn combine<'a,Em,FComb,FL,FR>(x: OptRef<'a,Self>,y: OptRef<'a,Self>,
-                                  inp_x: Transf<Em>,inp_y: Transf<Em>,
-                                  comb: &FComb,only_l:&FL,only_r:&FR,em: &mut Em)
-                                  -> Result<Option<(OptRef<'a,Self>,Transf<Em>)>,Em::Error>
-        where Em : Embed,
-              FComb : Fn(Transf<Em>,Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
-              FL : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
-              FR : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error> {
+impl<'a,Ptr: Composite<'a>+Clone,V: Composite<'a>+Clone
+     > Composite<'a> for CompValue<Ptr,V> {
+    fn combine<Em,FromL,PL,FromR,PR,FComb,FL,FR>(
+        pl: &PL,froml: &FromL,arrl: &[Em::Expr],
+        pr: &PR,fromr: &FromR,arrr: &[Em::Expr],
+        comb: &FComb,only_l: &FL,only_r: &FR,
+        res: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<Option<Self>,Em::Error>
+        where
+        Self: 'a,
+        Em: Embed,
+        PL: Path<'a,Em,FromL,To=Self>,
+        PR: Path<'a,Em,FromR,To=Self>,
+        FComb: Fn(Em::Expr,Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
+        FL: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
+        FR: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error> {
 
-        match x {
-            OptRef::Ref(&CompValue::Value(ref vx)) => {
-                let rvx = OptRef::Ref(vx);
-                let rvy = match y {
-                    OptRef::Ref(&CompValue::Value(ref vy))
-                        => OptRef::Ref(vy),
-                    OptRef::Owned(CompValue::Value(vy))
-                        => OptRef::Owned(vy),
+        match pl.get(froml) {
+            &CompValue::Value(ref vx) => {
+                let rvy = match pr.get(fromr) {
+                    &CompValue::Value(ref vy) => vy,
                     _ => return Ok(None)
                 };
-                match V::combine(rvx,rvy,inp_x,inp_y,
-                                 comb,only_l,only_r,em)? {
+                match V::combine(&pl.clone().then(Self::value()),froml,arrl,
+                                 &pr.clone().then(Self::value()),fromr,arrr,
+                                 comb,only_l,only_r,res,em)? {
                     None => Ok(None),
-                    Some((nv,inp_nv)) => Ok(Some((OptRef::Owned(CompValue::Value(nv.as_obj())),inp_nv)))
+                    Some(nv) => Ok(Some(CompValue::Value(nv)))
                 }
             },
-            OptRef::Owned(CompValue::Value(vx)) => {
-                let rvx = OptRef::Owned(vx);
-                let rvy = match y {
-                    OptRef::Ref(&CompValue::Value(ref vy))
-                        => OptRef::Ref(vy),
-                    OptRef::Owned(CompValue::Value(vy))
-                        => OptRef::Owned(vy),
+            &CompValue::Pointer(ref vx) => {
+                let rvy = match pr.get(fromr) {
+                    &CompValue::Pointer(ref vy) => vy,
                     _ => return Ok(None)
                 };
-                match V::combine(rvx,rvy,inp_x,inp_y,
-                                 comb,only_l,only_r,em)? {
+                match BitField::combine(&pl.clone().then(Self::pointer()),froml,arrl,
+                                        &pr.clone().then(Self::pointer()),fromr,arrr,
+                                        comb,only_l,only_r,res,em)? {
                     None => Ok(None),
-                    Some((nv,inp_nv)) => Ok(Some((OptRef::Owned(CompValue::Value(nv.as_obj())),inp_nv)))
+                    Some(nv) => Ok(Some(CompValue::Pointer(nv)))
                 }
             },
-            OptRef::Ref(&CompValue::Pointer(ref vx)) => {
-                let rvx = OptRef::Ref(vx);
-                let rvy = match y {
-                    OptRef::Ref(&CompValue::Pointer(ref vy))
-                        => OptRef::Ref(vy),
-                    OptRef::Owned(CompValue::Pointer(vy))
-                        => OptRef::Owned(vy),
+            &CompValue::Vector(ref vx) => {
+                let rvy = match pr.get(fromr) {
+                    &CompValue::Vector(ref vy) => vy,
                     _ => return Ok(None)
                 };
-                match BitField::combine(rvx,rvy,inp_x,inp_y,
-                                        comb,only_l,only_r,em)? {
+                match CompVec::combine(&pl.clone().then(Self::vector()),froml,arrl,
+                                       &pr.clone().then(Self::vector()),fromr,arrr,
+                                       comb,only_l,only_r,res,em)? {
                     None => Ok(None),
-                    Some((nv,inp_nv)) => Ok(Some((OptRef::Owned(CompValue::Pointer(nv.as_obj())),inp_nv)))
+                    Some(nv) => Ok(Some(CompValue::Vector(nv)))
                 }
             },
-            OptRef::Owned(CompValue::Pointer(vx)) => {
-                let rvx = OptRef::Owned(vx);
-                let rvy = match y {
-                    OptRef::Ref(&CompValue::Pointer(ref vy))
-                        => OptRef::Ref(vy),
-                    OptRef::Owned(CompValue::Pointer(vy))
-                        => OptRef::Owned(vy),
-                    _ => return Ok(None)
-                };
-                match BitField::combine(rvx,rvy,inp_x,inp_y,
-                                        comb,only_l,only_r,em)? {
-                    None => Ok(None),
-                    Some((nv,inp_nv)) => Ok(Some((OptRef::Owned(CompValue::Pointer(nv.as_obj())),inp_nv)))
-                }
-            },
-            OptRef::Ref(&CompValue::Vector(ref vx)) => {
-                let rvx = OptRef::Ref(vx);
-                let rvy = match y {
-                    OptRef::Ref(&CompValue::Vector(ref vy))
-                        => OptRef::Ref(vy),
-                    OptRef::Owned(CompValue::Vector(vy))
-                        => OptRef::Owned(vy),
-                    _ => return Ok(None)
-                };
-                match Vec::combine(rvx,rvy,inp_x,inp_y,
-                                   comb,only_l,only_r,em)? {
-                    None => Ok(None),
-                    Some((nv,inp_nv)) => Ok(Some((OptRef::Owned(CompValue::Vector(nv.as_obj())),inp_nv)))
-                }
-            },
-            OptRef::Owned(CompValue::Vector(vx)) => {
-                let rvx = OptRef::Owned(vx);
-                let rvy = match y {
-                    OptRef::Ref(&CompValue::Vector(ref vy))
-                        => OptRef::Ref(vy),
-                    OptRef::Owned(CompValue::Vector(vy))
-                        => OptRef::Owned(vy),
-                    _ => return Ok(None)
-                };
-                match Vec::combine(rvx,rvy,inp_x,inp_y,
-                                   comb,only_l,only_r,em)? {
-                    None => Ok(None),
-                    Some((nv,inp_nv)) => Ok(Some((OptRef::Owned(CompValue::Vector(nv.as_obj())),inp_nv)))
-                }
-            },
-            OptRef::Ref(&CompValue::Metadata) => {
-                match y {
-                    OptRef::Ref(&CompValue::Metadata) => Ok(Some((OptRef::Owned(CompValue::Metadata),inp_x))),
-                    OptRef::Owned(CompValue::Metadata) => Ok(Some((OptRef::Owned(CompValue::Metadata),inp_x))),
-                    _ => Ok(None)
-                }
-            },
-            OptRef::Owned(CompValue::Metadata) => {
-                match y {
-                    OptRef::Ref(&CompValue::Metadata) => Ok(Some((OptRef::Owned(CompValue::Metadata),inp_x))),
-                    OptRef::Owned(CompValue::Metadata) => Ok(Some((OptRef::Owned(CompValue::Metadata),inp_x))),
+            &CompValue::Metadata => {
+                match pr.get(fromr) {
+                    &CompValue::Metadata => Ok(Some(CompValue::Metadata)),
                     _ => Ok(None)
                 }
             }
@@ -2905,63 +2593,71 @@ impl<Ptr : Composite+Clone,V : Composite+Clone> Composite for CompValue<Ptr,V> {
     }
 }
 
-impl<'a,Ptr : Composite,V : Composite> FromMD<'a> for CompValue<Ptr,V> {
-    fn from_md<Em : Embed>(_:&'a llvm_ir::Metadata) -> Result<(Self,Transf<Em>),Em::Error> {
-        Ok((CompValue::Metadata,Transformation::id(0)))
+impl<'a,Ptr: Composite<'a>,V: Composite<'a>> FromMD<'a> for CompValue<Ptr,V> {
+    fn from_md<Em: Embed>(_: &'a llvm_ir::Metadata,
+                          _: &mut Vec<Em::Expr>,
+                          _: &mut Em)
+                          -> Result<Self,Em::Error> {
+        Ok(CompValue::Metadata)
     }
 }
 
-impl<'c,Ptr : Pointer<'c>+Bytes+Clone,V : IntValue+Bytes+Clone> IntValue for CompValue<Ptr,V> {
-    fn to_offset<'a,Em : Embed>(v: OptRef<'a,Self>,tr: Transf<Em>) -> (Singleton,Transf<Em>) {
-        match v {
-            OptRef::Owned(CompValue::Value(pv))
-                => V::to_offset(OptRef::Owned(pv),tr),
-            OptRef::Ref(&CompValue::Value(ref pv))
-                => V::to_offset(OptRef::Ref(pv),tr),
-            _ => panic!("Pointer cannot be used as offset")
-        }
+impl<'a,Ptr: Pointer<'a>+Bytes<'a>+Clone,V: 'a+IntValue<'a>+Bytes<'a>+Clone> IntValue<'a> for CompValue<Ptr,V> {
+    fn to_offset<From,P: Path<'a,Em,From,To=Self>,
+                 Em: Embed>(path: &P,from: &From,inp: &[Em::Expr],
+                            res: &mut Vec<Em::Expr>,em: &mut Em)
+                            -> Result<Singleton,Em::Error> {
+        V::to_offset(&then(path.clone(),CompValueValueP),from,inp,res,em)
     }
-    fn from_offset<'a,Em : Embed>(bw: usize,tp: &Singleton,inp: Transf<Em>)
-                                  -> (Self,Transf<Em>) {
-        let (v,v_inp) = V::from_offset(bw,tp,inp);
-        (CompValue::Value(v),v_inp)
+    fn from_offset<From,P: Path<'a,Em,From,To=Singleton>,
+                   Em: Embed>(bw: usize,
+                              path: &P,
+                              from: &From,
+                              arr: &[Em::Expr],
+                              res: &mut Vec<Em::Expr>,
+                              em: &mut Em)
+                              -> Result<Self,Em::Error> {
+        let v = V::from_offset(bw,path,from,arr,res,em)?;
+        Ok(CompValue::Value(v))
     }
-
-    fn const_int<Em : Embed>(bw: u64,val: BigUint,em: &mut Em) -> Result<(Self,Vec<Em::Expr>),Em::Error> {
-        let (v,inp_v) = V::const_int(bw,val,em)?;
-        Ok((CompValue::Value(v),inp_v))
+    fn const_int<Em: Embed>(bw: u64,val: BigUint,res: &mut Vec<Em::Expr>,em: &mut Em)
+                            -> Result<Self,Em::Error> {
+        let v = V::const_int(bw,val,res,em)?;
+        Ok(CompValue::Value(v))
     }
-    fn bin<'b,Em>(op: &llvm_ir::BinOp,
-                  lhs: &Self,
-                  rhs: &Self,
-                  inp_l: Transf<Em>,
-                  inp_r: Transf<Em>,
-                  exprs: &[Em::Expr],
-                  em: &mut Em)
-                  -> Result<(Self,Transf<Em>),Em::Error>
-        where Em : DeriveValues {
-        match lhs {
-            &CompValue::Value(ref rlhs) => {
-                let rrhs = match rhs {
-                    &CompValue::Value(ref v)
-                        => v,
-                    _ => panic!("Cannot binop pointers with values")
-                };
-                let (res,inp_res) = V::bin(op,rlhs,rrhs,inp_l,inp_r,exprs,em)?;
-                Ok((CompValue::Value(res),
-                    inp_res))
+    fn bin<From1,P1: Path<'a,Em,From1,To=Self>,
+           From2,P2: Path<'a,Em,From2,To=Self>,
+           Em: DeriveValues>(op: &llvm_ir::BinOp,
+                             lhs: &P1,
+                             lfrom: &From1,
+                             larr: &[Em::Expr],
+                             rhs: &P2,
+                             rfrom: &From2,
+                             rarr: &[Em::Expr],
+                             res: &mut Vec<Em::Expr>,
+                             em: &mut Em)
+                             -> Result<Self,Em::Error> {
+        match lhs.get(lfrom) {
+            &CompValue::Value(_) => {
+                let nv = V::bin(op,
+                                &then(lhs.clone(),CompValueValueP),lfrom,larr,
+                                &then(rhs.clone(),CompValueValueP),rfrom,rarr,
+                                res,em)?;
+                Ok(CompValue::Value(nv))
             },
-            &CompValue::Pointer(ref rlhs) => match op {
-                &llvm_ir::BinOp::And => match rhs {
-                    &CompValue::Value(ref rrhs) => {
-                        let (_,mask_inp) = V::to_offset(OptRef::Ref(rrhs),inp_r);
-                        let mask_e = mask_inp.get(&exprs,0,em)?;
-                        match em.derive_const(&mask_e)? {
+            &CompValue::Pointer(_) => match op {
+                &llvm_ir::BinOp::And => match rhs.get(rfrom) {
+                    &CompValue::Value(_) => {
+                        let mut mask_inp = Vec::new();
+                        let mask = V::to_offset(&then(rhs.clone(),CompValueValueP),rfrom,rarr,
+                                                &mut mask_inp,em)?;
+                        let val = Singleton::get(&Id,&mask,&mask_inp[..],em)?;
+                        match em.derive_const(&val)? {
                             None => unimplemented!(),
                             Some(mask_c) => if value_as_index(&mask_c)<8 {
-                                let (res,inp_res) = V::const_int((rrhs.byte_width()*8) as u64,BigUint::from(0 as u8),em)?;
-                                Ok((CompValue::Value(res),
-                                    Transformation::constant(inp_res)))
+                                let nv = V::const_int((rhs.get(rfrom).byte_width()*8) as u64,
+                                                      BigUint::from(0u8),res,em)?;
+                                Ok(CompValue::Value(nv))
                             } else {
                                 unimplemented!()
                             }
@@ -2969,209 +2665,187 @@ impl<'c,Ptr : Pointer<'c>+Bytes+Clone,V : IntValue+Bytes+Clone> IntValue for Com
                     },
                     _ => unimplemented!()
                 },
-                &llvm_ir::BinOp::Sub(_,_) => match rhs {
+                &llvm_ir::BinOp::Sub(_,_) => match rhs.get(rfrom) {
                     &CompValue::Pointer(ref rrhs) => {
-                        let bw = rlhs.byte_width()*8;
-                        let (l_base,l_base_inp) = BitField::to_pointer(
-                            OptRef::Ref(rlhs),inp_l
-                        ).unwrap();
-                        let (r_base,r_base_inp) = BitField::to_pointer(
-                            OptRef::Ref(rrhs),inp_r
-                        ).unwrap();
-                        let tp : SortKind<Sort> = SortKind::BitVec(bw);
-                        let res_inp = ptr_sub(l_base.as_ref(),
-                                              l_base_inp,
-                                              r_base.as_ref(),
-                                              r_base_inp,
-                                              &tp,em)?;
+                        let bw = lhs.get(lfrom).byte_width()*8;
+                        let mut l_base_inp = Vec::new();
+                        let l_base = BitField::to_pointer(&then(lhs.clone(),CompValuePointerP),lfrom,larr,
+                                                          &mut l_base_inp,em)?.unwrap();
+                        let mut r_base_inp = Vec::new();
+                        let r_base = BitField::to_pointer(&then(rhs.clone(),CompValuePointerP),rfrom,rarr,
+                                                          &mut r_base_inp,em)?.unwrap();
+                        let tp: SortKind<Sort> = SortKind::BitVec(bw);
+                        let sub = ptr_sub(&Id,&l_base,&l_base_inp[..],
+                                          &Id,&r_base,&r_base_inp[..],&tp,em)?;
                         let srt = Singleton(Sort::from_kind(tp));
-                        let (ret,ret_inp) = V::from_offset(bw,&srt,res_inp);
-                        Ok((CompValue::Value(ret),ret_inp))
+                        let ret = V::from_offset(bw,&Id,&srt,&[sub],res,em)?;
+                        Ok(CompValue::Value(ret))
                     },
                     _ => unimplemented!()
                 },
                 _ => unimplemented!()
             },
-            &CompValue::Vector(_) => {
-                unimplemented!()
-            },
-            &CompValue::Metadata => unimplemented!()
+            _ => unimplemented!()
         }
     }
-    fn sext<'a,Em>(x: OptRef<'a,Self>,inp: Transf<Em>,sz: usize,em: &mut Em)
-                   -> (OptRef<'a,Self>,Transf<Em>)
-        where Em : Embed {
-        let (nx,ninp) = match x {
-            OptRef::Owned(CompValue::Value(v)) => {
-                let (nv,ninp) = V::sext(OptRef::Owned(v),inp,sz,em);
-                (CompValue::Value(nv.as_obj()),ninp)
+    fn sext<From,P: Path<'a,Em,From,To=Self>,
+            Em: Embed>(path: &P,from: &From,inp: &[Em::Expr],
+                       sz: usize,res: &mut Vec<Em::Expr>,em: &mut Em)
+                       -> Result<Self,Em::Error>
+    where Self: 'a {
+        match path.get(from) {
+            &CompValue::Value(_) => {
+                let nv = V::sext(&then(path.clone(),CompValueValueP),from,inp,sz,res,em)?;
+                Ok(CompValue::Value(nv))
             },
-            OptRef::Ref(&CompValue::Value(ref v)) => {
-                let (nv,ninp) = V::sext(OptRef::Ref(v),inp,sz,em);
-                (CompValue::Value(nv.as_obj()),ninp)
-            },
-            _ => panic!("Cannot sext pointers")
-        };
-        (OptRef::Owned(nx),ninp)
+            _ => unimplemented!()
+        }
     }
-    fn zext<'a,Em>(x: OptRef<'a,Self>,inp: Transf<Em>,sz: usize,em: &mut Em)
-                   -> (OptRef<'a,Self>,Transf<Em>)
-        where Em : Embed {
-        let (nx,ninp) = match x {
-            OptRef::Owned(CompValue::Value(v)) => {
-                let (nv,ninp) = V::zext(OptRef::Owned(v),inp,sz,em);
-                (CompValue::Value(nv.as_obj()),ninp)
+    fn zext<From,P: Path<'a,Em,From,To=Self>,
+            Em: Embed>(path: &P,from: &From,inp: &[Em::Expr],
+                       sz: usize,res: &mut Vec<Em::Expr>,em: &mut Em)
+                       -> Result<Self,Em::Error>
+    where Self: 'a {
+        match path.get(from) {
+            &CompValue::Value(_) => {
+                let nv = V::zext(&then(path.clone(),CompValueValueP),from,inp,sz,res,em)?;
+                Ok(CompValue::Value(nv))
             },
-            OptRef::Ref(&CompValue::Value(ref v)) => {
-                let (nv,ninp) = V::zext(OptRef::Ref(v),inp,sz,em);
-                (CompValue::Value(nv.as_obj()),ninp)
-            },
-            _ => panic!("Cannot zext pointers")
-        };
-        (OptRef::Owned(nx),ninp)
+            _ => unimplemented!()
+        }
     }
-    fn trunc<'a,Em>(x: OptRef<'a,Self>,inp: Transf<Em>,sz: usize,em: &mut Em)
-                    -> (OptRef<'a,Self>,Transf<Em>)
-        where Em : Embed {
-        let (nx,ninp) = match x {
-            OptRef::Owned(CompValue::Value(v)) => {
-                let (nv,ninp) = V::trunc(OptRef::Owned(v),inp,sz,em);
-                (CompValue::Value(nv.as_obj()),ninp)
+    fn trunc<From,P: Path<'a,Em,From,To=Self>,
+             Em: Embed>(path: &P,from: &From,inp: &[Em::Expr],
+                        sz: usize,res: &mut Vec<Em::Expr>,em: &mut Em)
+                        -> Result<Self,Em::Error>
+    where Self: 'a {
+        match path.get(from) {
+            &CompValue::Value(_) => {
+                let nv = V::trunc(&then(path.clone(),CompValueValueP),from,inp,sz,res,em)?;
+                Ok(CompValue::Value(nv))
             },
-            OptRef::Ref(&CompValue::Value(ref v)) => {
-                let (nv,ninp) = V::trunc(OptRef::Ref(v),inp,sz,em);
-                (CompValue::Value(nv.as_obj()),ninp)
-            },
-            _ => panic!("Cannot truncate pointers")
-        };
-        (OptRef::Owned(nx),ninp)
+            _ => unimplemented!()
+        }
     }
+    fn icmp<From1,P1: Path<'a,Em,From1,To=Self>,
+            From2,P2: Path<'a,Em,From2,To=Self>,
+            Em: Embed>(op: &llvm_ir::CmpOp,
+                       p1: &P1,from1: &From1,inp1: &[Em::Expr],
+                       p2: &P2,from2: &From2,inp2: &[Em::Expr],
+                       em: &mut Em)
+                       -> Result<Em::Expr,Em::Error>
+    where Self: 'a {
 
-    fn icmp<Em>(op: &llvm_ir::CmpOp,
-                lhs: &Self,lhs_inp: Transf<Em>,
-                rhs: &Self,rhs_inp: Transf<Em>,
-                em: &mut Em)
-                -> Result<Transf<Em>,Em::Error>
-        where Em : Embed {
-
-        match lhs {
-            &CompValue::Value(ref vl) => match rhs {
-                &CompValue::Value(ref vr)
-                    => V::icmp(op,vl,lhs_inp,vr,rhs_inp,em),
-                _ => panic!("Cannot compare values with pointers")
+        match p1.get(from1) {
+            &CompValue::Value(_) => match p2.get(from2) {
+                &CompValue::Value(_) => V::icmp(op,
+                                                &then(p1.clone(),
+                                                      CompValueValueP),
+                                                from1,inp1,
+                                                &then(p2.clone(),
+                                                      CompValueValueP),
+                                                from2,inp2,em),
+                _ => unimplemented!()
             },
-            &CompValue::Pointer(ref pl) => match rhs {
-                &CompValue::Pointer(ref pr)
-                    => match op {
-                        &llvm_ir::CmpOp::Eq => Ok(BitField::ptr_eq(pl,lhs_inp,
-                                                                   pr,rhs_inp)),
-                        &llvm_ir::CmpOp::Ne
-                            => Ok(Transformation::not(BitField::ptr_eq(pl,lhs_inp,
-                                                                       pr,rhs_inp))),
-                        &llvm_ir::CmpOp::ULt => BitField::ptr_lt(pl,lhs_inp,
-                                                                 pr,rhs_inp,em),
-                        _ => panic!("Cannot compare pointers using {:?}",op)
+            &CompValue::Pointer(_) => match p2.get(from2) {
+                &CompValue::Pointer(_) => match op {
+                    &llvm_ir::CmpOp::Eq => BitField::ptr_eq(&then(p1.clone(),
+                                                                  CompValuePointerP),
+                                                            from1,inp1,
+                                                            &then(p2.clone(),
+                                                                  CompValuePointerP),
+                                                            from2,inp2,em),
+                    &llvm_ir::CmpOp::Ne => {
+                        let x = BitField::ptr_eq(&then(p1.clone(),
+                                                       CompValuePointerP),
+                                                 from1,inp1,
+                                                 &then(p2.clone(),
+                                                       CompValuePointerP),
+                                                 from2,inp2,em)?;
+                        em.not(x)
                     },
-                _ => panic!("Cannot compare values with pointers")
+                    &llvm_ir::CmpOp::ULt => BitField::ptr_lt(&then(p1.clone(),
+                                                                   CompValuePointerP),
+                                                             from1,inp1,
+                                                             &then(p2.clone(),
+                                                                   CompValuePointerP),
+                                                             from2,inp2,em),
+                    _ => unimplemented!()
+                },
+                _ => unimplemented!()
             },
-            _ => panic!("Cannot icmp")
+            _ => unimplemented!()
         }
     }
-    fn from_bool<Em : Embed>(v: Transf<Em>) -> Result<(Self,Transf<Em>),Em::Error> {
-        let (r,r_inp) = V::from_bool(v)?;
-        Ok((CompValue::Value(r),r_inp))
+    fn from_bool<Em: Embed>(e: Em::Expr,res: &mut Vec<Em::Expr>,em: &mut Em)
+                            -> Result<Self,Em::Error> {
+        let r = V::from_bool(e,res,em)?;
+        Ok(CompValue::Value(r))
     }
-    fn to_bool<'a,Em : Embed>(val: OptRef<'a,Self>,inp: Transf<Em>) -> Result<Transf<Em>,Em::Error> {
-        let rval = match val {
-            OptRef::Owned(CompValue::Value(v))
-                => OptRef::Owned(v),
-            OptRef::Ref(&CompValue::Value(ref v))
-                => OptRef::Ref(v),
-            _ => panic!("Cannot convert pointers to bool")
-        };
-        V::to_bool(rval,inp)
+    fn to_bool<From,P: Path<'a,Em,From,To=Self>,
+               Em: Embed>(path: &P,from: &From,inp: &[Em::Expr],em: &mut Em)
+                          -> Result<Em::Expr,Em::Error>
+    where Self: 'a {
+        match path.get(from) {
+            &CompValue::Value(_) => V::to_bool(&then(path.clone(),CompValueValueP),from,inp,em),
+            _ => unimplemented!()
+        }
     }
 }
 
-impl<Ptr : Bytes+Clone,V : Bytes+Clone> Bytes for CompValue<Ptr,V> {
+impl<'a,Ptr: 'a+Bytes<'a>+Clone,V: 'a+Bytes<'a>+Clone> Bytes<'a> for CompValue<Ptr,V> {
     fn byte_width(&self) -> usize {
         match self {
             &CompValue::Value(ref v) => v.byte_width(),
             &CompValue::Pointer(ref p) => p.obj.byte_width(),
-            &CompValue::Vector(ref v) => {
+            &CompValue::Vector(_) => {
+                let vec_path = then(Id,CompValueVectorP);
+                let els = CompVec::elements(vec_path,self);
                 let mut acc = 0;
-                for el in v.iter() {
-                    acc+=el.byte_width()
+                for el in els {
+                    acc+=el.get(self).byte_width();
                 }
                 acc
             },
             &CompValue::Metadata => unimplemented!()
         }
     }
-    fn extract_bytes<'a,Em : Embed>(x: OptRef<'a,Self>,
-                                    inp_x: Transf<Em>,
-                                    start: usize,
-                                    len: usize,
-                                    em: &mut Em)
-                                    -> Result<Option<(OptRef<'a,Self>,Transf<Em>)>,Em::Error> {
-        match x {
-            OptRef::Ref(&CompValue::Value(ref vx)) => match V::extract_bytes(OptRef::Ref(vx),inp_x,start,len,em)? {
-                None => Ok(None),
-                Some((nvx,inp_nvx)) => Ok(Some((OptRef::Owned(CompValue::Value(nvx.as_obj())),
-                                                inp_nvx)))
-            },
-            OptRef::Owned(CompValue::Value(vx)) => match V::extract_bytes(OptRef::Owned(vx),inp_x,start,len,em)? {
-                None => Ok(None),
-                Some((nvx,inp_nvx)) => Ok(Some((OptRef::Owned(CompValue::Value(nvx.as_obj())),
-                                                inp_nvx)))
-            },
-            OptRef::Ref(&CompValue::Pointer(ref vx)) => match BitField::extract_bytes(OptRef::Ref(vx),inp_x,start,len,em)? {
-                None => Ok(None),
-                Some((nvx,inp_nvx)) => Ok(Some((OptRef::Owned(CompValue::Pointer(nvx.as_obj())),
-                                                inp_nvx)))
-            },
-            OptRef::Owned(CompValue::Pointer(vx)) => match BitField::extract_bytes(OptRef::Owned(vx),inp_x,start,len,em)? {
-                None => Ok(None),
-                Some((nvx,inp_nvx)) => Ok(Some((OptRef::Owned(CompValue::Pointer(nvx.as_obj())),
-                                                inp_nvx)))
-            },
-            OptRef::Ref(&CompValue::Vector(ref vx)) => {
-                let mut acc = 0;
-                let mut off = 0;
-                for el in vx.iter() {
-                    let sz = el.byte_width();
-                    let nel = el.num_elem();
-                    if start >= acc {
-                        if len + start - acc > sz {
-                            return Ok(None)
-                        } else {
-                            return CompValue::extract_bytes(OptRef::Ref(el),
-                                                            Transformation::view(off,nel,inp_x),
-                                                            start-acc,len,em)
-                        }
-                    }
-                    acc+=sz;
-                    off+=nel;
+    fn extract_bytes<Em: Embed,From,P: Path<'a,Em,From,To=Self>>(
+        path: &P,from: &From,arr: &[Em::Expr],
+        start: usize,len: usize,
+        res: &mut Vec<Em::Expr>,
+        em: &mut Em
+    ) -> Result<Option<Self>,Em::Error> {
+        match path.get(from) {
+            &CompValue::Value(_) => {
+                match V::extract_bytes(&then(path.clone(),CompValueValueP),
+                                       from,arr,start,len,res,em)? {
+                    None => Ok(None),
+                    Some(nv) => Ok(Some(CompValue::Value(nv)))
                 }
-                Ok(None)
             },
-            OptRef::Owned(CompValue::Vector(mut vx)) => {
+            &CompValue::Pointer(_) => {
+                match BitField::extract_bytes(&then(path.clone(),CompValuePointerP),
+                                              from,arr,start,len,res,em)? {
+                    None => Ok(None),
+                    Some(nv) => Ok(Some(CompValue::Pointer(nv)))
+                }
+            },
+            &CompValue::Vector(_) => {
+                let vec_path = then(path.clone(),CompValueVectorP);
+                let els = CompVec::elements(vec_path,from);
                 let mut acc = 0;
-                let mut off = 0;
-                for el in vx.drain(..) {
-                    let sz = el.byte_width();
-                    let nel = el.num_elem();
+                for el in els {
+                    let sz = el.get(from).byte_width();
                     if start >= acc {
                         if len + start - acc > sz {
                             return Ok(None)
                         } else {
-                            return CompValue::extract_bytes(OptRef::Owned(el),
-                                                            Transformation::view(off,nel,inp_x),
-                                                            start-acc,len,em)
+                            return CompValue::extract_bytes(&el,from,arr,
+                                                            start-acc,len,res,em)
                         }
                     }
                     acc+=sz;
-                    off+=nel;
                 }
                 Ok(None)
             },
@@ -3180,156 +2854,266 @@ impl<Ptr : Bytes+Clone,V : Bytes+Clone> Bytes for CompValue<Ptr,V> {
     }
 }
 
-impl<'a,Ptr : Pointer<'a>+Clone,V : Composite+Clone> Pointer<'a> for CompValue<Ptr,V> {
-    fn from_pointer<'b,Em : Embed>(bw: usize,
-                                   base: OptRef<'b,BasePointer<'a>>,
-                                   inp_base: Transf<Em>)
-                                   -> (OptRef<'b,Self>,Transf<Em>) {
-        let (ptr,inp_ptr) = BitField::from_pointer(bw,base,inp_base);
-        (OptRef::Owned(CompValue::Pointer(ptr.as_obj())),inp_ptr)
+impl<'a,Ptr: Pointer<'a>+Clone,V: 'a+Composite<'a>+Clone> Pointer<'a> for CompValue<Ptr,V> {
+    fn from_pointer<Em: Embed,From,P: Path<'a,Em,From,To=BasePointer<'a>>>(
+        bw: usize,
+        path: &P,
+        from: &From,
+        inp: &[Em::Expr],
+        res: &mut Vec<Em::Expr>,
+        em: &mut Em
+    ) -> Result<Self,Em::Error> {
+        let nptr = BitField::from_pointer(bw,path,from,inp,res,em)?;
+        Ok(CompValue::Pointer(nptr))
     }
-    fn to_pointer<'b,Em : Embed>(ptr: OptRef<'b,Self>,
-                                 inp_ptr: Transf<Em>)
-                                 -> Option<(OptRef<'b,BasePointer<'a>>,Transf<Em>)> {
-        let rptr = match ptr {
-            OptRef::Owned(CompValue::Pointer(p))
-                => OptRef::Owned(p),
-            OptRef::Ref(&CompValue::Pointer(ref p))
-                => OptRef::Ref(p),
-            _ => return None
-        };
-        BitField::to_pointer(rptr,inp_ptr)
-    }
-    fn ptr_eq<Em : Embed>(lhs: &Self,lhs_inp: Transf<Em>,
-                          rhs: &Self,rhs_inp: Transf<Em>)
-                          -> Transf<Em> {
-        match lhs {
-            &CompValue::Pointer(ref pl) => match rhs {
-                &CompValue::Pointer(ref pr)
-                    => BitField::ptr_eq(pl,lhs_inp,pr,rhs_inp),
-                _ => panic!("Cannot eq pointers and values")
+    fn to_pointer<Em: Embed,From,P: Path<'a,Em,From,To=Self>>(
+        path: &P,
+        from: &From,
+        inp:  &[Em::Expr],
+        res:  &mut Vec<Em::Expr>,
+        em:   &mut Em
+    ) -> Result<Option<BasePointer<'a>>,Em::Error> {
+        match path.get(from) {
+            &CompValue::Pointer(_) => {
+                let ptr = then(path.clone(),
+                               CompValuePointerP);
+                BitField::to_pointer(&ptr,from,inp,res,em)
             },
-            _ => panic!("Cannot eq pointers and values")
+            _ => unimplemented!()
         }
     }
-    fn ptr_lt<Em : Embed>(lhs: &Self,lhs_inp: Transf<Em>,
-                          rhs: &Self,rhs_inp: Transf<Em>,em: &mut Em)
-                          -> Result<Transf<Em>,Em::Error> {
-        match lhs {
-            &CompValue::Pointer(ref pl) => match rhs {
-                &CompValue::Pointer(ref pr)
-                    => BitField::ptr_lt(pl,lhs_inp,pr,rhs_inp,em),
-                _ => panic!("Cannot compare pointers and values")
+    fn ptr_eq<Em: Embed,
+              From1,P1: Path<'a,Em,From1,To=Self>,
+              From2,P2: Path<'a,Em,From2,To=Self>>(
+        p1: &P1,from1: &From1,inp1: &[Em::Expr],
+        p2: &P2,from2: &From2,inp2: &[Em::Expr],
+        em: &mut Em
+    ) -> Result<Em::Expr,Em::Error> {
+        match p1.get(from1) {
+            &CompValue::Pointer(_) => match p2.get(from2) {
+                &CompValue::Pointer(_) => {
+                    let ptr1 = then(p1.clone(),CompValuePointerP);
+                    let ptr2 = then(p2.clone(),CompValuePointerP);
+                    BitField::ptr_eq(&ptr1,from1,inp1,
+                                     &ptr2,from2,inp2,em)
+                },
+                _ => unimplemented!()
             },
-            _ => panic!("Cannot compare pointers and values")
+            _ => unimplemented!()
         }
     }
-
+    fn ptr_lt<Em: Embed,
+              From1,P1: Path<'a,Em,From1,To=Self>,
+              From2,P2: Path<'a,Em,From2,To=Self>>(
+        p1: &P1,from1: &From1,inp1: &[Em::Expr],
+        p2: &P2,from2: &From2,inp2: &[Em::Expr],
+        em: &mut Em
+    ) -> Result<Em::Expr,Em::Error> {
+        match p1.get(from1) {
+            &CompValue::Pointer(_) => match p2.get(from2) {
+                &CompValue::Pointer(_) => {
+                    let ptr1 = then(p1.clone(),CompValuePointerP);
+                    let ptr2 = then(p2.clone(),CompValuePointerP);
+                    BitField::ptr_lt(&ptr1,from1,inp1,
+                                     &ptr2,from2,inp2,em)
+                },
+                _ => unimplemented!()
+            },
+            _ => unimplemented!()
+        }
+    }
 }
 
-impl<C : HasSorts> HasSorts for ByteWidth<C> {
+impl<'a,C: 'a> SimplePathEl<'a,ByteWidth<C>> for ByteWidthP {
+    type To = C;
+    fn get<'b>(&self,from: &'b ByteWidth<C>) -> &'b Self::To where 'a: 'b {
+        &from.value
+    }
+    fn get_mut<'b>(&self,from: &'b mut ByteWidth<C>) -> &'b mut Self::To where 'a: 'b {
+        &mut from.value
+    }
+}
+
+impl<'a,Em: Embed,C: 'a> PathEl<'a,Em,ByteWidth<C>> for ByteWidthP {
+    fn read<PrevFrom,Prev: Path<'a,Em,PrevFrom,To=ByteWidth<C>>>(
+        &self,
+        prev: &Prev,
+        from: &PrevFrom,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        prev.read(from,pos,arr,em)
+    }
+    fn read_slice<'b,PrevFrom,Prev: Path<'a,Em,PrevFrom,To=ByteWidth<C>>>(
+        &self,
+        prev: &Prev,
+        from: &PrevFrom,
+        pos: usize,
+        len: usize,
+        arr: &'b [Em::Expr])
+        -> Option<&'b [Em::Expr]> {
+        prev.read_slice(from,pos,len,arr)
+    }
+    fn write<PrevFrom,Prev: Path<'a,Em,PrevFrom,To=ByteWidth<C>>>(
+        &self,
+        prev: &Prev,
+        from: &PrevFrom,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write(from,pos,e,arr,em)
+    }
+    fn write_slice<PrevFrom,Prev: Path<'a,Em,PrevFrom,To=ByteWidth<C>>>(
+        &self,
+        prev: &Prev,
+        from: &mut PrevFrom,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write_slice(from,pos,old_len,src,trg,em)
+    }
+}
+
+impl<C: HasSorts> HasSorts for ByteWidth<C> {
     fn num_elem(&self) -> usize {
         self.value.num_elem()
     }
-    fn elem_sort<Em : Embed>(&self,n:usize,em: &mut Em)
-                             -> Result<Em::Sort,Em::Error> {
+    fn elem_sort<Em: Embed>(&self,n:usize,em: &mut Em)
+                            -> Result<Em::Sort,Em::Error> {
         self.value.elem_sort(n,em)
     }
 }
 
-impl<C : Composite+Clone> Composite for ByteWidth<C> {
-    fn combine<'a,Em,FComb,FL,FR>(x: OptRef<'a,Self>,y: OptRef<'a,Self>,
-                                  inp_x: Transf<Em>,inp_y: Transf<Em>,
-                                  comb: &FComb,only_l:&FL,only_r:&FR,em: &mut Em)
-                                  -> Result<Option<(OptRef<'a,Self>,Transf<Em>)>,Em::Error>
-        where Em : Embed,
-              FComb : Fn(Transf<Em>,Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
-              FL : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error>,
-              FR : Fn(Transf<Em>,&mut Em) -> Result<Transf<Em>,Em::Error> {
-        let bw = x.as_ref().byte_width;
-        if bw!=y.as_ref().byte_width {
+impl<'a,C: Composite<'a>> Composite<'a> for ByteWidth<C> {
+    fn combine<Em,FromL,PL,FromR,PR,FComb,FL,FR>(
+        pl: &PL,froml: &FromL,arrl: &[Em::Expr],
+        pr: &PR,fromr: &FromR,arrr: &[Em::Expr],
+        comb: &FComb,only_l: &FL,only_r: &FR,
+        res: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<Option<Self>,Em::Error>
+        where
+        Self: 'a,
+        Em: Embed,
+        PL: Path<'a,Em,FromL,To=Self>,
+        PR: Path<'a,Em,FromR,To=Self>,
+        FComb: Fn(Em::Expr,Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
+        FL: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
+        FR: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error> {
+
+        let w = pl.get(froml).byte_width;
+        if w!=pr.get(fromr).byte_width {
             return Ok(None)
         }
-        let rx = match x {
-            OptRef::Owned(cx) => OptRef::Owned(cx.value),
-            OptRef::Ref(ref cx) => OptRef::Ref(&cx.value)
-        };
-        let ry = match y {
-            OptRef::Owned(cy) => OptRef::Owned(cy.value),
-            OptRef::Ref(ref cy) => OptRef::Ref(&cy.value)
-        };
-        match C::combine(rx,ry,inp_x,inp_y,comb,only_l,only_r,em)? {
+        match C::combine(&pl.clone().then(Self::element()),froml,arrl,
+                         &pr.clone().then(Self::element()),fromr,arrr,
+                         comb,only_l,only_r,res,em)? {
             None => Ok(None),
-            Some((n,inp_n)) => Ok(Some((OptRef::Owned(ByteWidth { value: n.as_obj(),
-                                                                  byte_width: bw }),
-                                        inp_n)))
+            Some(nv) => {
+                Ok(Some(ByteWidth { value: nv,
+                                    byte_width: w }))
+            }
         }
     }
 }
 
-impl<'a,C : Pointer<'a>+Clone> Pointer<'a> for ByteWidth<C> {
-    fn from_pointer<'b,Em : Embed>(bw: usize,
-                                   base: OptRef<'b,BasePointer<'a>>,
-                                   inp_base: Transf<Em>)
-                                   -> (OptRef<'b,Self>,Transf<Em>) {
-        let (val,inp_val) = C::from_pointer(bw,base,inp_base);
-        (OptRef::Owned(ByteWidth { value: val.as_obj(),
-                                   byte_width: bw }),inp_val)
+impl<'a,C: Pointer<'a>+Clone> Pointer<'a> for ByteWidth<C> {
+    fn from_pointer<Em: Embed,From,P: Path<'a,Em,From,To=BasePointer<'a>>>(
+        bw:   usize,
+        path: &P,
+        from: &From,
+        inp:  &[Em::Expr],
+        res:  &mut Vec<Em::Expr>,
+        em:   &mut Em
+    ) -> Result<Self,Em::Error> {
+        let val = C::from_pointer(bw,path,from,inp,res,em)?;
+        Ok(ByteWidth { value: val,
+                       byte_width: bw })
     }
-    fn to_pointer<'b,Em : Embed>(p: OptRef<'b,Self>,inp_p: Transf<Em>)
-                                 -> Option<(OptRef<'b,BasePointer<'a>>,Transf<Em>)> {
-        match p {
-            OptRef::Owned(rp) => C::to_pointer(OptRef::Owned(rp.value),inp_p),
-            OptRef::Ref(ref rp) => C::to_pointer(OptRef::Ref(&rp.value),inp_p)
-        }
+    fn to_pointer<Em: Embed,From,P: Path<'a,Em,From,To=Self>>(
+        path: &P,
+        from: &From,
+        inp:  &[Em::Expr],
+        res:  &mut Vec<Em::Expr>,
+        em:   &mut Em
+    ) -> Result<Option<BasePointer<'a>>,Em::Error> {
+        let el = then(path.clone(),
+                      ByteWidthP);
+        C::to_pointer(&el,from,inp,res,em)
     }
-    fn ptr_eq<Em : Embed>(lhs: &Self,lhs_inp: Transf<Em>,
-                          rhs: &Self,rhs_inp: Transf<Em>)
-                          -> Transf<Em> {
-        C::ptr_eq(&lhs.value,lhs_inp,&rhs.value,rhs_inp)
+    fn ptr_eq<Em: Embed,
+              From1,P1: Path<'a,Em,From1,To=Self>,
+              From2,P2: Path<'a,Em,From2,To=Self>>(
+        p1: &P1,from1: &From1,inp1: &[Em::Expr],
+        p2: &P2,from2: &From2,inp2: &[Em::Expr],
+        em: &mut Em
+    ) -> Result<Em::Expr,Em::Error> {
+        let el1 = then(p1.clone(),ByteWidthP);
+        let el2 = then(p2.clone(),ByteWidthP);
+        C::ptr_eq(&el1,from1,inp1,
+                  &el2,from2,inp2,em)
     }
-    fn ptr_lt<Em : Embed>(lhs: &Self,lhs_inp: Transf<Em>,
-                          rhs: &Self,rhs_inp: Transf<Em>,em: &mut Em)
-                          -> Result<Transf<Em>,Em::Error> {
-        C::ptr_lt(&lhs.value,lhs_inp,&rhs.value,rhs_inp,em)
+    fn ptr_lt<Em: Embed,
+              From1,P1: Path<'a,Em,From1,To=Self>,
+              From2,P2: Path<'a,Em,From2,To=Self>>(
+        p1: &P1,from1: &From1,inp1: &[Em::Expr],
+        p2: &P2,from2: &From2,inp2: &[Em::Expr],
+        em: &mut Em
+    ) -> Result<Em::Expr,Em::Error> {
+        let el1 = then(p1.clone(),ByteWidthP);
+        let el2 = then(p2.clone(),ByteWidthP);
+        C::ptr_lt(&el1,from1,inp1,
+                  &el2,from2,inp2,em)
     }
-
 }
 
-impl<'a,C : Composite+Clone> Bytes for ByteWidth<C> {
+impl<'a,C: 'a+Composite<'a>+Clone> Bytes<'a> for ByteWidth<C> {
     fn byte_width(&self) -> usize {
         self.byte_width
     }
-    fn extract_bytes<'b,Em : Embed>(_:OptRef<'b,Self>,
-                                    _:Transf<Em>,
-                                    _:usize,
-                                    _:usize,
-                                    _:&mut Em)
-                                    -> Result<Option<(OptRef<'b,Self>,Transf<Em>)>,Em::Error> {
+    fn extract_bytes<Em: Embed,From,P: Path<'a,Em,From,To=Self>>(
+        path: &P,from: &From,arr: &[Em::Expr],
+        start: usize,len: usize,
+        res: &mut Vec<Em::Expr>,
+        em: &mut Em
+    ) -> Result<Option<Self>,Em::Error> {
         Ok(None)
     }
-
 }
 
-impl<Ptr : Composite+Clone,V : Composite+Clone> Vector for CompValue<Ptr,V> {
-    fn vector<'a,Em : Embed>(vec: OptRef<'a,Vec<Self>>,
-                             inp_vec: Vec<Transf<Em>>,
-                             _: &mut Em)
-                             -> Result<(OptRef<'a,Self>,Transf<Em>),Em::Error> {
-        Ok((OptRef::Owned(CompValue::Vector(vec.as_obj())),
-            Transformation::concat(&inp_vec)))
+impl<'a,Ptr: Composite<'a>+Clone,V: Composite<'a>+Clone> Vector<'a> for CompValue<Ptr,V> {
+    fn vector<Em: Embed>(vec: Vec<Self>,
+                         inp_vec: &mut Vec<Em::Expr>,
+                         _: &mut Em)
+                         -> Result<Self,Em::Error> {
+        Ok(CompValue::Vector(CompVec::from_vec(vec)))
     }
 }
 
-impl<'a,Ptr : Bytes+Pointer<'a>+Clone,V : Bytes+IntValue+Clone> FromConst<'a> for CompValue<Ptr,V> {
+impl<'a,Ptr: 'a+Bytes<'a>+Pointer<'a>+Clone,
+     V: 'a+Bytes<'a>+IntValue<'a>+Clone> FromConst<'a> for CompValue<Ptr,V> {
     fn from_const<'b,Em : Embed>(dl: &'a DataLayout,
                                  c: &'a llvm_ir::Constant,
                                  tp: &'a Type,
                                  tps: &'a HashMap<String,Type>,
+                                 res: &mut Vec<Em::Expr>,
                                  em: &mut Em)
-                                 -> Result<Option<(Self,Transf<Em>)>,Em::Error> {
-        let res = translate_constant(dl,c,tp,tps,em)?;
-        Ok(Some(res))
+                                 -> Result<Option<Self>,Em::Error> {
+        let ret = translate_constant(dl,c,tp,tps,res,em)?;
+        Ok(Some(ret))
     }
 }
-*/
+
+fn value_as_index(val: &Value) -> usize {
+    match val {
+        &Value::Int(ref v) => v.to_usize().unwrap(),
+        &Value::BitVec(_,ref v) => v.to_usize().unwrap(),
+        _ => panic!("Value not an index")
+    }
+}

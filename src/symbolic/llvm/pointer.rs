@@ -3,6 +3,7 @@ use smtrs::composite::choice::*;
 use smtrs::composite::singleton::*;
 use smtrs::composite::tuple::*;
 use smtrs::composite::option::*;
+use smtrs::composite::vec::*;
 use smtrs::embed::Embed;
 use smtrs::types::{Sort,SortKind};
 use smtrs::expr::Expr;
@@ -14,21 +15,25 @@ use super::mem::Bytes;
 use std::fmt;
 use std::marker::PhantomData;
 
-pub trait Pointer<'a>: Composite<'a> {
-    fn from_pointer<Em: Embed,P: Path<'a,Em,To=BasePointer<'a>>>(
-        usize,&P,&P::From,&[Em::Expr],&mut Vec<Em::Expr>,&mut Em
+pub trait Pointer<'a>: 'a+Composite<'a> {
+    fn from_pointer<Em: Embed,From,P: Path<'a,Em,From,To=BasePointer<'a>>>(
+        usize,&P,&From,&[Em::Expr],&mut Vec<Em::Expr>,&mut Em
     ) -> Result<Self,Em::Error>;
-    fn to_pointer<Em: Embed,P: Path<'a,Em,To=Self>>(
-        &P,&P::From,&[Em::Expr],&mut Vec<Em::Expr>,&mut Em
+    fn to_pointer<Em: Embed,From,P: Path<'a,Em,From,To=Self>>(
+        &P,&From,&[Em::Expr],&mut Vec<Em::Expr>,&mut Em
     ) -> Result<Option<BasePointer<'a>>,Em::Error>;
-    fn ptr_eq<Em: Embed,P1: Path<'a,Em,To=Self>,P2: Path<'a,Em,To=Self>>(
-        &P1,&P1::From,&[Em::Expr],
-        &P2,&P2::From,&[Em::Expr],
+    fn ptr_eq<Em: Embed,
+              From1,P1: Path<'a,Em,From1,To=Self>,
+              From2,P2: Path<'a,Em,From2,To=Self>>(
+        &P1,&From1,&[Em::Expr],
+        &P2,&From2,&[Em::Expr],
         &mut Em
     ) -> Result<Em::Expr,Em::Error>;
-    fn ptr_lt<Em: Embed,P1: Path<'a,Em,To=Self>,P2: Path<'a,Em,To=Self>>(
-        &P1,&P1::From,&[Em::Expr],
-        &P2,&P2::From,&[Em::Expr],
+    fn ptr_lt<Em: Embed,
+              From1,P1: Path<'a,Em,From1,To=Self>,
+              From2,P2: Path<'a,Em,From2,To=Self>>(
+        &P1,&From1,&[Em::Expr],
+        &P2,&From2,&[Em::Expr],
         &mut Em
     ) -> Result<Em::Expr,Em::Error>;
 }
@@ -41,8 +46,7 @@ pub fn base_pointer_null<'a,Em: Embed>(
     res: &mut Vec<Em::Expr>,
     em: &mut Em)
     -> Result<BasePointer<'a>,Em::Error> {
-    Choice::singleton((PointerTrg::Null,(Data((0,0)),None)),
-                      &[][..],
+    Choice::singleton(|res,em| { Ok((PointerTrg::Null,(Data((0,0)),None))) },
                       res,em)
 }
 
@@ -52,46 +56,44 @@ pub fn base_pointer_global<'a,Em: Embed>(
     res: &mut Vec<Em::Expr>,
     em: &mut Em
 ) -> Result<BasePointer<'a>,Em::Error> {
-    Choice::singleton((PointerTrg::Global(name),(Data((mult,0)),None)),
-                      &[][..],
+    Choice::singleton(|res,em| { Ok((PointerTrg::Global(name),(Data((mult,0)),None))) },
                       res,em)
 }
 
-/*
-pub fn base_pointer_gep<'a,'b,'c,Em : Embed>(ptr: OptRef<'a,BasePointer<'b>>,
-                                             inp_ptr: Transf<Em>,
-                                             gep: Vec<(Option<(Singleton,Transf<Em>)>,usize)>,
-                                             em: &mut Em)
-                                             -> Result<(OptRef<'c,BasePointer<'b>>,Transf<Em>),Em::Error> {
-    let (nptr,inp_nptr) = ptr.as_obj().map(inp_ptr,em,&|inp_cond,base,inp_base,_| {
-        let (trg,inp_trg,off,inp_off) = decompose_tuple(OptRef::Owned(base),inp_base);
-        let mut coff = off;
-        let mut inp_coff = inp_off;
-        for &(ref dyn,stat) in gep.iter() {
-            let (noff,inp_noff) = match dyn {
-                &None => offset_advance(coff,inp_coff,stat),
-                &Some((ref rdyn,ref inp_rdyn)) => match offset_advance_dyn(coff,inp_coff,rdyn.clone(),inp_rdyn.clone())? {
-                    None => panic!("Cannot advance pointer dynamically here"),
-                    Some(r) => r
+pub fn base_pointer_gep<'a,Em: Embed,
+                        From,P: Path<'a,Em,From,To=BasePointer<'a>>,
+                        FromGEP,PGEP: Path<'a,Em,FromGEP,To=CompVec<(Option<Singleton>,Data<usize>)>>>(
+    p: P,
+    from: &mut From,
+    arr: &mut Vec<Em::Expr>,
+    gep: &PGEP,
+    gep_from: &FromGEP,
+    gep_arr: &[Em::Expr],
+    em: &mut Em)
+    -> Result<(),Em::Error> {
+    for el in Choice::elements(p,from) {
+        let off = el.then(element2of2());
+        for gep_el in CompVec::elements(gep.clone(),gep_from) {
+            let dyn = gep_el.clone().then(element1of2());
+            let stat = gep_el.then(element2of2()).get(gep_from).0;
+            match option(dyn,gep_from) {
+                None => offset_advance(&off,from,arr,stat,em)?,
+                Some(rdyn) => if !offset_advance_dyn(&off,from,arr,&rdyn,gep_from,gep_arr,em)? {
+                    panic!("Cannot advance pointer dynamically here")
                 }
-            };
-            coff = noff;
-            inp_coff = inp_noff;
+            }
         }
-        let (nbase,inp_nbase) = tuple(trg,coff,inp_trg,inp_coff);
-        Ok((inp_cond,nbase.as_obj(),inp_nbase))
-    })?;
-    Ok((OptRef::Owned(nptr),inp_nptr))
+    }
+    Ok(())
 }
-*/
 
 pub fn offset_zero(sz: usize) -> Offset {
     (Data((0,sz)),None)
 }
 
-pub fn offset_advance<'a,Em: Embed,P: Path<'a,Em,To=Offset>>(
+pub fn offset_advance<'a,Em: Embed,From,P: Path<'a,Em,From,To=Offset>>(
     path: &P,
-    from: &mut P::From,
+    from: &mut From,
     _: &mut Vec<Em::Expr>,
     add: usize,
     _: &mut Em
@@ -101,13 +103,13 @@ pub fn offset_advance<'a,Em: Embed,P: Path<'a,Em,To=Offset>>(
 }
 
 pub fn offset_advance_dyn<'a,Em: Embed,
-                          POff: Path<'a,Em,To=Offset>,
-                          PAdd: Path<'a,Em,To=Singleton>>(
+                          FromOff,POff: Path<'a,Em,FromOff,To=Offset>,
+                          FromAdd,PAdd: Path<'a,Em,FromAdd,To=Singleton>>(
     path: &POff,
-    from: &mut POff::From,
+    from: &mut FromOff,
     src:  &mut Vec<Em::Expr>,
     padd:     &PAdd,
-    from_add: &PAdd::From,
+    from_add: &FromAdd,
     src_add:  &[Em::Expr],
     em: &mut Em
 ) -> Result<bool,Em::Error> {
@@ -170,6 +172,31 @@ impl<'a> PointerTrg<'a> {
         arr.push(idx);
         Ok(PointerTrg::Heap(instr,bw))
     }
+    pub fn stack<Em: Embed>(thr: ThreadId<'a>,
+                            thr_idx: Em::Expr,
+                            fr: FrameId<'a>,
+                            fr_idx: Em::Expr,
+                            alloc: InstructionRef<'a>,
+                            alloc_idx: Em::Expr,
+                            res: &mut Vec<Em::Expr>,
+                            em: &mut Em) -> Result<Self,Em::Error> {
+        let thr_tp = em.type_of(&thr_idx)?;
+        let thr_bw = em.is_bitvec(&thr_tp)?
+        .expect("Stack pointer created with non-bitvec thread-index");
+        let fr_tp = em.type_of(&fr_idx)?;
+        let fr_bw = em.is_bitvec(&fr_tp)?
+        .expect("Stack pointer created with non-bitvec frame-index");
+        let alloc_tp = em.type_of(&alloc_idx)?;
+        let alloc_bw = em.is_bitvec(&alloc_tp)?
+        .expect("Stack pointer created with non-bitvec alloc-index");
+        res.reserve(3);
+        res.push(thr_idx);
+        res.push(fr_idx);
+        res.push(alloc_idx);
+        Ok(PointerTrg::Stack(thr,thr_bw,
+                             fr,fr_bw,
+                             alloc,alloc_bw))
+    }
 }
 
 impl<'b> HasSorts for PointerTrg<'b> {
@@ -183,8 +210,8 @@ impl<'b> HasSorts for PointerTrg<'b> {
             PointerTrg::AuxArray => 0
         }
     }
-    fn elem_sort<Em : Embed>(&self,pos: usize,em: &mut Em)
-                             -> Result<Em::Sort,Em::Error> {
+    fn elem_sort<Em: Embed>(&self,pos: usize,em: &mut Em)
+                            -> Result<Em::Sort,Em::Error> {
         match *self {
             PointerTrg::Null => panic!("Invalid index"),
             PointerTrg::Global(_) => panic!("Invalid index"),
@@ -206,17 +233,18 @@ impl<'b> HasSorts for PointerTrg<'b> {
 }
 
 impl<'a> Composite<'a> for PointerTrg<'a> {
-    fn combine<Em,PL,PR,FComb,FL,FR>(
-        pl: &PL,froml: &PL::From,arrl: &[Em::Expr],
-        pr: &PR,fromr: &PR::From,arrr: &[Em::Expr],
+    fn combine<Em,FromL,PL,FromR,PR,FComb,FL,FR>(
+        pl: &PL,froml: &FromL,arrl: &[Em::Expr],
+        pr: &PR,fromr: &FromR,arrr: &[Em::Expr],
         comb: &FComb,only_l: &FL,only_r: &FR,
         res: &mut Vec<Em::Expr>,
         em: &mut Em)
         -> Result<Option<Self>,Em::Error>
         where
+        Self: 'a,
         Em: Embed,
-        PL: Path<'a,Em,To=Self>,
-        PR: Path<'a,Em,To=Self>,
+        PL: Path<'a,Em,FromL,To=Self>,
+        PR: Path<'a,Em,FromR,To=Self>,
         FComb: Fn(Em::Expr,Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
         FL: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
         FR: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error> {
@@ -239,10 +267,10 @@ impl<'a> Composite<'a> for PointerTrg<'a> {
 }
 
 impl<'a> Pointer<'a> for BasePointer<'a> {
-    fn from_pointer<Em: Embed,P: Path<'a,Em,To=Self>>(
+    fn from_pointer<Em: Embed,From,P: Path<'a,Em,From,To=Self>>(
         bw: usize,
         path: &P,
-        from: &P::From,
+        from: &From,
         src: &[Em::Expr],
         trg: &mut Vec<Em::Expr>,
         em: &mut Em
@@ -251,9 +279,9 @@ impl<'a> Pointer<'a> for BasePointer<'a> {
         path.read_into(from,0,base.num_elem(),src,trg,em)?;
         Ok(base.clone())
     }
-    fn to_pointer<Em: Embed,P: Path<'a,Em,To=Self>>(
+    fn to_pointer<Em: Embed,From,P: Path<'a,Em,From,To=Self>>(
         path: &P,
-        from: &P::From,
+        from: &From,
         src:  &[Em::Expr],
         trg:  &mut Vec<Em::Expr>,
         em:   &mut Em
@@ -262,9 +290,11 @@ impl<'a> Pointer<'a> for BasePointer<'a> {
         path.read_into(from,0,base.num_elem(),src,trg,em)?;
         Ok(Some(base.clone()))
     }
-    fn ptr_eq<Em: Embed,P1: Path<'a,Em,To=Self>,P2: Path<'a,Em,To=Self>>(
-        pl: &P1,froml: &P1::From,arrl: &[Em::Expr],
-        pr: &P2,fromr: &P2::From,arrr: &[Em::Expr],
+    fn ptr_eq<Em: Embed,
+              From1,P1: Path<'a,Em,From1,To=Self>,
+              From2,P2: Path<'a,Em,From2,To=Self>>(
+        pl: &P1,froml: &From1,arrl: &[Em::Expr],
+        pr: &P2,fromr: &From2,arrr: &[Em::Expr],
         em: &mut Em
     ) -> Result<Em::Expr,Em::Error> {
         match Choice::sym_eq(pl,froml,arrl,
@@ -274,16 +304,18 @@ impl<'a> Pointer<'a> for BasePointer<'a> {
             None => em.const_bool(false)
         }
     }
-    fn ptr_lt<Em: Embed,P1: Path<'a,Em,To=Self>,P2: Path<'a,Em,To=Self>>(
-        pl: &P1,froml: &P1::From,arrl: &[Em::Expr],
-        pr: &P2,fromr: &P2::From,arrr: &[Em::Expr],
+    fn ptr_lt<Em: Embed,
+              From1,P1: Path<'a,Em,From1,To=Self>,
+              From2,P2: Path<'a,Em,From2,To=Self>>(
+        pl: &P1,froml: &From1,arrl: &[Em::Expr],
+        pr: &P2,fromr: &From2,arrr: &[Em::Expr],
         em: &mut Em
     ) -> Result<Em::Expr,Em::Error> {
         let f = |
-        pl: &Then<P1,ChoiceEl<(PointerTrg<'a>,Offset)>>,
-        froml: &P1::From,srcl: &[Em::Expr],
-        pr: &Then<P2,ChoiceEl<(PointerTrg<'a>,Offset)>>,
-        fromr: &P2::From,srcr: &[Em::Expr],
+        pl: &Then<P1,ChoiceEl>,
+        froml: &From1,srcl: &[Em::Expr],
+        pr: &Then<P2,ChoiceEl>,
+        fromr: &From2,srcr: &[Em::Expr],
         em: &mut Em| {
 
             let &(ref trgl,ref offl) = pl.get(froml);
@@ -403,10 +435,10 @@ pub fn offset_eq<Em : Embed>(lhs: &Offset,lhs_inp: Transf<Em>,
 }*/
 
 pub fn offset_lt<'a,Em: Embed,
-                 P1: Path<'a,Em,To=Offset>,
-                 P2: Path<'a,Em,To=Offset>>(
-    pl: &P1,froml: &P1::From,srcl: &[Em::Expr],
-    pr: &P2,fromr: &P2::From,srcr: &[Em::Expr],
+                 From1,P1: Path<'a,Em,From1,To=Offset>,
+                 From2,P2: Path<'a,Em,From2,To=Offset>>(
+    pl: &P1,froml: &From1,srcl: &[Em::Expr],
+    pr: &P2,fromr: &From2,srcr: &[Em::Expr],
     em: &mut Em
 ) -> Result<Option<Em::Expr>,Em::Error> {
     
@@ -453,61 +485,73 @@ pub struct BitField<T> {
 }
 
 impl<T: HasSorts> BitField<T> {
-    pub fn obj() -> BitFieldObj<T> {
-        BitFieldObj(PhantomData)
+    pub fn obj() -> BitFieldObj {
+        BitFieldObj
     }
-    pub fn field<'a,Em: Embed,P: Path<'a,Em,To=Self>>(
+    pub fn field<'a,Em: Embed,From,P: Path<'a,Em,From,To=Self>>(
         path: &P,
-        from: &P::From,
+        from: &From,
         src:  &[Em::Expr],
         em:   &mut Em
-    ) -> Result<Em::Expr,Em::Error> {
+    ) -> Result<Em::Expr,Em::Error>
+        where T: 'a {
         debug_assert!(path.get(from).size.is_some());
         let off = path.get(from).obj.num_elem();
         path.read(from,off,src,em)
     }
-}
-
-pub struct BitFieldObj<T>(PhantomData<T>);
-
-impl<T> Clone for BitFieldObj<T> {
-    fn clone(&self) -> Self {
-        BitFieldObj(PhantomData)
+    pub fn field_opt<'a,Em: Embed,From,P: Path<'a,Em,From,To=Self>>(
+        path: &P,
+        from: &From,
+        src:  &[Em::Expr],
+        em:   &mut Em
+    ) -> Result<Option<(Em::Expr,usize)>,Em::Error>
+    where T: 'a {
+        match path.get(from).size {
+            None => Ok(None),
+            Some(bw) => {
+                let off = path.get(from).obj.num_elem();
+                let expr = path.read(from,off,src,em)?;
+                Ok(Some((expr,bw)))
+            }
+        }
     }
 }
 
-impl<'a,T: 'a> SimplePathEl<'a> for BitFieldObj<T> {
-    type From = BitField<T>;
+#[derive(Clone)]
+pub struct BitFieldObj;
+
+impl<'a,T: 'a> SimplePathEl<'a,BitField<T>> for BitFieldObj {
     type To = T;
-    fn get<'b>(&self,from: &'b Self::From) -> &'b Self::To where 'a: 'b {
+    fn get<'b>(&self,from: &'b BitField<T>) -> &'b Self::To where 'a: 'b {
         &from.obj
     }
-    fn get_mut<'b>(&self,from: &'b mut Self::From) -> &'b mut Self::To where 'a: 'b {
+    fn get_mut<'b>(&self,from: &'b mut BitField<T>)
+                   -> &'b mut Self::To where 'a: 'b {
         &mut from.obj
     }
 }
 
-impl<'a,Em: Embed,T: 'a> PathEl<'a,Em> for BitFieldObj<T> {
-    fn read<Prev: Path<'a,Em,To=Self::From>>(
+impl<'a,Em: Embed,T: 'a> PathEl<'a,Em,BitField<T>> for BitFieldObj {
+    fn read<PrevFrom,Prev: Path<'a,Em,PrevFrom,To=BitField<T>>>(
         &self,
         prev: &Prev,
-        from: &Prev::From,
+        from: &PrevFrom,
         pos: usize,
         src: &[Em::Expr],
         em: &mut Em
     ) -> Result<Em::Expr,Em::Error> {
         prev.read(from,pos,src,em)
     }
-    fn read_slice<'b,Prev: Path<'a,Em,To=Self::From>>(
-        &self,prev: &Prev,from: &Prev::From,pos: usize,len: usize,src: &'b [Em::Expr])
+    fn read_slice<'b,PrevFrom,Prev: Path<'a,Em,PrevFrom,To=BitField<T>>>(
+        &self,prev: &Prev,from: &PrevFrom,pos: usize,len: usize,src: &'b [Em::Expr])
         -> Option<&'b [Em::Expr]> {
 
         prev.read_slice(from,pos,len,src)
     }
-    fn write<Prev: Path<'a,Em,To=Self::From>>(
+    fn write<PrevFrom,Prev: Path<'a,Em,PrevFrom,To=BitField<T>>>(
         &self,
         prev: &Prev,
-        from: &Prev::From,
+        from: &PrevFrom,
         pos: usize,
         expr: Em::Expr,
         src: &mut Vec<Em::Expr>,
@@ -515,10 +559,10 @@ impl<'a,Em: Embed,T: 'a> PathEl<'a,Em> for BitFieldObj<T> {
     ) -> Result<(),Em::Error> {
         prev.write(from,pos,expr,src,em)
     }
-    fn write_slice<Prev: Path<'a,Em,To=Self::From>>(
+    fn write_slice<PrevFrom,Prev: Path<'a,Em,PrevFrom,To=BitField<T>>>(
         &self,
         prev: &Prev,
-        from: &mut Prev::From,
+        from: &mut PrevFrom,
         pos: usize,
         old_len: usize,
         src: &mut Vec<Em::Expr>,
@@ -529,7 +573,7 @@ impl<'a,Em: Embed,T: 'a> PathEl<'a,Em> for BitFieldObj<T> {
     }
 }
 
-impl<T : HasSorts> HasSorts for BitField<T> {
+impl<T: HasSorts> HasSorts for BitField<T> {
     fn num_elem(&self) -> usize {
         match self.size {
             None => self.obj.num_elem(),
@@ -553,23 +597,24 @@ impl<T : HasSorts> HasSorts for BitField<T> {
 }
 
 impl<'a,T: Composite<'a>> Composite<'a> for BitField<T> {
-    fn combine<Em,PL,PR,FComb,FL,FR>(
-        pl: &PL,froml: &PL::From,srcl: &[Em::Expr],
-        pr: &PR,fromr: &PR::From,srcr: &[Em::Expr],
+    fn combine<Em,FromL,PL,FromR,PR,FComb,FL,FR>(
+        pl: &PL,froml: &FromL,srcl: &[Em::Expr],
+        pr: &PR,fromr: &FromR,srcr: &[Em::Expr],
         comb: &FComb,only_l: &FL,only_r: &FR,
         res: &mut Vec<Em::Expr>,
         em: &mut Em)
         -> Result<Option<Self>,Em::Error>
         where
+        Self: 'a,
         Em: Embed,
-        PL: Path<'a,Em,To=Self>,
-        PR: Path<'a,Em,To=Self>,
+        PL: Path<'a,Em,FromL,To=Self>,
+        PR: Path<'a,Em,FromR,To=Self>,
         FComb: Fn(Em::Expr,Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
         FL: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
         FR: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error> {
 
-        let pobjl = pl.clone().then(BitField::obj());
-        let pobjr = pr.clone().then(BitField::obj());
+        let pobjl = then(pl.clone(),BitFieldObj);
+        let pobjr = then(pr.clone(),BitFieldObj);
 
         let nobj = match T::combine(&pobjl,froml,srcl,
                                     &pobjr,fromr,srcr,
@@ -618,7 +663,7 @@ pub enum BitFieldMeaning<M> {
     Field
 }
 
-impl<T : Semantic+HasSorts> Semantic for BitField<T> {
+impl<T: Semantic+HasSorts> Semantic for BitField<T> {
     type Meaning = BitFieldMeaning<T::Meaning>;
     type MeaningCtx = BitFieldMeaning<T::MeaningCtx>;
     fn meaning(&self,pos: usize) -> Self::Meaning {
@@ -673,103 +718,78 @@ impl<T : Semantic+HasSorts> Semantic for BitField<T> {
     }
 }
 
-/*impl<'b,Ptr : Pointer<'b>> Pointer<'b> for BitField<Ptr> {
-    fn from_pointer<'a,Em : Embed>(bw: usize,
-                                   ptr: OptRef<'a,BasePointer<'b>>,
-                                   ptr_inp: Transf<Em>)
-                                   -> (OptRef<'a,Self>,Transf<Em>) {
-        let (nptr,nptr_inp) = Ptr::from_pointer(bw,ptr,ptr_inp);
-        (OptRef::Owned(BitField { obj: nptr.as_obj(),
-                                  size: None }),nptr_inp)
+impl<'a,Ptr: Pointer<'a>> Pointer<'a> for BitField<Ptr> {
+    fn from_pointer<Em: Embed,From,P: Path<'a,Em,From,To=BasePointer<'a>>>(
+        bw: usize,path: &P,from: &From,inp: &[Em::Expr],
+        res: &mut Vec<Em::Expr>,em: &mut Em
+    ) -> Result<Self,Em::Error> {
+        let nptr = Ptr::from_pointer(bw,path,from,inp,res,em)?;
+        Ok(BitField { obj: nptr,
+                      size: None })
     }
-    fn to_pointer<'a,Em : Embed>(this: OptRef<'a,Self>,inp: Transf<Em>)
-                                 -> Option<(OptRef<'a,BasePointer<'b>>,Transf<Em>)> {
-        let (obj,sz) = match this {
-            OptRef::Ref(ref bf) => (OptRef::Ref(&bf.obj),bf.size),
-            OptRef::Owned(bf) => (OptRef::Owned(bf.obj),bf.size)
-        };
-        let obj_inp = match sz {
-            None => inp,
-            Some(_) => {
-                let sz = inp.size();
-                Transformation::view(0,sz-1,inp)
-            }
-        };
-        Ptr::to_pointer(obj,obj_inp)
+    fn to_pointer<Em: Embed,From,P: Path<'a,Em,From,To=Self>>(
+        path: &P,from: &From,inp: &[Em::Expr],
+        res: &mut Vec<Em::Expr>,em: &mut Em
+    ) -> Result<Option<BasePointer<'a>>,Em::Error> {
+        Ptr::to_pointer(&then(path.clone(),
+                              BitFieldObj),
+                        from,inp,res,em)
     }
-    fn ptr_eq<Em : Embed>(lhs: &Self,lhs_inp: Transf<Em>,
-                          rhs: &Self,rhs_inp: Transf<Em>) -> Transf<Em> {
-        let (lobj_inp,lsz) = match lhs.size {
-            None => (lhs_inp,None),
-            Some(w) => {
-                let sz = lhs_inp.size();
-                (Transformation::view(0,sz-1,lhs_inp.clone()),
-                 Some((w,Transformation::view(sz-1,1,lhs_inp))))
-            }
-        };
-        let (robj_inp,rsz) = match rhs.size {
-            None => (rhs_inp,None),
-            Some(w) => {
-                let sz = rhs_inp.size();
-                (Transformation::view(0,sz-1,rhs_inp.clone()),
-                 Some((w,Transformation::view(sz-1,1,rhs_inp))))
-            }
-        };
-        let base_eq = Ptr::ptr_eq(&lhs.obj,lobj_inp,
-                                  &rhs.obj,robj_inp);
-        match lsz {
-            None => match rsz {
-                None => base_eq,
-                Some((rw,rbits)) => {
-                    let f = move |_:&[Em::Expr],_:usize,e:Em::Expr,em:&mut Em| {
-                        let bv0 = em.const_bitvec(rw,BigUint::from(0 as u8))?;
-                        em.eq(e,bv0)
-                    };
-                    let sub_eq = Transformation::map_by_elem(Box::new(f),rbits);
-                    Transformation::and(vec![base_eq,sub_eq])
+    fn ptr_eq<Em: Embed,
+              From1,P1: Path<'a,Em,From1,To=Self>,
+              From2,P2: Path<'a,Em,From2,To=Self>>(
+        path1: &P1,from1: &From1,inp1: &[Em::Expr],
+        path2: &P2,from2: &From2,inp2: &[Em::Expr],
+        em: &mut Em
+    ) -> Result<Em::Expr,Em::Error> {
+        let base_eq = Ptr::ptr_eq(&then(path1.clone(),
+                                        BitFieldObj),
+                                  from1,inp1,
+                                  &then(path2.clone(),
+                                        BitFieldObj),
+                                  from2,inp2,em)?;
+        let field1 = BitField::field_opt(path1,from1,inp1,em)?;
+        let field2 = BitField::field_opt(path2,from2,inp2,em)?;
+        match field1 {
+            None => match field2 {
+                None => Ok(base_eq),
+                Some((e2,bw2)) => {
+                    let bv0 = em.const_bitvec(bw2,BigUint::from(0u8))?;
+                    let field_zero = em.eq(e2,bv0)?;
+                    em.and(vec![base_eq,field_zero])
                 }
             },
-            Some((lw,lbits)) => match rsz {
+            Some((e1,bw1)) => match field2 {
                 None => {
-                    let f = move |_:&[Em::Expr],_:usize,e:Em::Expr,em:&mut Em| {
-                        let bv0 = em.const_bitvec(lw,BigUint::from(0 as u8))?;
-                        em.eq(e,bv0)
-                    };
-                    let sub_eq = Transformation::map_by_elem(Box::new(f),lbits);
-                    Transformation::and(vec![base_eq,sub_eq])
+                    let bv0 = em.const_bitvec(bw1,BigUint::from(0u8))?;
+                    let field_zero = em.eq(e1,bv0)?;
+                    em.and(vec![base_eq,field_zero])
                 },
-                Some((rw,rbits)) => {
-                    assert_eq!(rw,lw);
-                    let f = |es:&[Em::Expr],em:&mut Em| em.eq(es[0].clone(),es[1].clone());
-                    let sub_eq = Transformation::zips_by_elem(Box::new(f),vec![lbits,rbits]);
-                    Transformation::and(vec![base_eq,sub_eq])
+                Some((e2,bw2)) => {
+                    assert_eq!(bw1,bw2);
+                    let field_eq = em.eq(e1,e2)?;
+                    em.and(vec![base_eq,field_eq])
                 }
             }
         }
     }
-    fn ptr_lt<Em : Embed>(lhs: &Self,lhs_inp: Transf<Em>,
-                          rhs: &Self,rhs_inp: Transf<Em>,em: &mut Em)
-                          -> Result<Transf<Em>,Em::Error> {
-        let (lobj_inp,lsz) = match lhs.size {
-            None => (lhs_inp,None),
-            Some(w) => {
-                let sz = lhs_inp.size();
-                (Transformation::view(0,sz-1,lhs_inp.clone()),
-                 Some((w,Transformation::view(sz-1,1,lhs_inp))))
-            }
-        };
-        let (robj_inp,rsz) = match rhs.size {
-            None => (rhs_inp,None),
-            Some(w) => {
-                let sz = rhs_inp.size();
-                (Transformation::view(0,sz-1,rhs_inp.clone()),
-                 Some((w,Transformation::view(sz-1,1,rhs_inp))))
-            }
-        };
-        let base_lt = Ptr::ptr_lt(&lhs.obj,lobj_inp,
-                                  &rhs.obj,robj_inp,em)?;
-        match lsz {
-            None => match rsz {
+    fn ptr_lt<Em: Embed,
+              From1,P1: Path<'a,Em,From1,To=Self>,
+              From2,P2: Path<'a,Em,From2,To=Self>>(
+        path1: &P1,from1: &From1,inp1: &[Em::Expr],
+        path2: &P2,from2: &From2,inp2: &[Em::Expr],
+        em: &mut Em
+    ) -> Result<Em::Expr,Em::Error> {
+        let base_lt = Ptr::ptr_lt(&then(path1.clone(),
+                                        BitFieldObj),
+                                  from1,inp1,
+                                  &then(path2.clone(),
+                                        BitFieldObj),
+                                  from2,inp2,em)?;
+        let field1 = BitField::field_opt(path1,from1,inp1,em)?;
+        let field2 = BitField::field_opt(path2,from2,inp2,em)?;
+        match field1 {
+            None => match field2 {
                 None => Ok(base_lt),
                 _ => unimplemented!()
             },
@@ -778,85 +798,55 @@ impl<T : Semantic+HasSorts> Semantic for BitField<T> {
     }
 }
 
-impl<T : Bytes> Bytes for BitField<T> {
+impl<'a,T: 'a+Bytes<'a>> Bytes<'a> for BitField<T> {
     fn byte_width(&self) -> usize {
         self.obj.byte_width()
     }
-    fn extract_bytes<'a,Em : Embed>(this: OptRef<'a,Self>,inp: Transf<Em>,
-                                    start: usize,len: usize,em: &mut Em)
-                                    -> Result<Option<(OptRef<'a,Self>,Transf<Em>)>,Em::Error> {
-        Ok(None)
-    }
-    fn concat_bytes<'a,Em : Embed>(this: OptRef<'a,Self>,this_inp: Transf<Em>,
-                                   oth: OptRef<'a,Self>,oth_inp: Transf<Em>,
-                                   em: &mut Em)
-                                   -> Result<Option<(OptRef<'a,Self>,Transf<Em>)>,Em::Error> {
+    fn extract_bytes<Em: Embed,From,P: Path<'a,Em,From,To=Self>>(
+        path: &P,from: &From,arr: &[Em::Expr],
+        start: usize,len: usize,
+        res: &mut Vec<Em::Expr>,
+        em: &mut Em
+    ) -> Result<Option<Self>,Em::Error> {
         Ok(None)
     }
 }
 
-pub fn ptr_sub<'a,Em : Embed,S>(lhs: &BasePointer<'a>,
-                                lhs_inp: Transf<Em>,
-                                rhs: &BasePointer<'a>,
-                                rhs_inp: Transf<Em>,
-                                tp: &SortKind<S>,
-                                em: &mut Em)
-                                -> Result<Transf<Em>,Em::Error> {
+pub fn ptr_sub<'a,Em: Embed,S,
+               FromL,PL: Path<'a,Em,FromL,To=BasePointer<'a>>,
+               FromR,PR: Path<'a,Em,FromR,To=BasePointer<'a>>>(
+
+    pl: &PL,froml: &FromL,inpl: &[Em::Expr],
+    pr: &PR,fromr: &FromR,inpr: &[Em::Expr],
+    tp: &SortKind<S>,em: &mut Em) -> Result<Em::Expr,Em::Error> {
+
     let mut conds = Vec::new();
-    let mut l_it = lhs.chosen(lhs_inp.clone());
-    let mut ret : Option<Transf<Em>> = None;
-    while let Some(l_view) = l_it.next(&mut conds,0,em)? {
-        let (l_el,l_inp)
-            = l_view.get_with_inp(lhs,lhs_inp.clone());
-        let &(ref l_trg,ref l_off) = l_el;
-        let l_trg_sz = l_trg.num_elem();
-        let l_trg_inp = Transformation::view(0,l_trg_sz,
-                                             l_inp.clone());
-        let l_off_inp = Transformation::view(l_trg_sz,
-                                             l_inp.size()-l_trg_sz,
-                                             l_inp.clone());
-        let &(Data((_,l_stat)),ref l_dyn) = l_off;
-        let mut r_it = rhs.chosen(rhs_inp.clone());
+    let mut l_it = Choice::choices(pl.clone(),froml,inpl,em)?;
+    let mut ret: Option<Em::Expr> = None;
+    while let Some(l) = l_it.next(&mut conds,0,em)? {
+
+        let l_trg = then(l.clone(),Element1Of2);
+        let l_off = then(l,Element2Of2);
+
+        let &(Data((_,l_stat)),_) = l_off.get(froml);
+        let mut r_it = Choice::choices(pr.clone(),fromr,inpr,em)?;
         let cpos = conds.len();
-        while let Some(r_view) = r_it.next(&mut conds,cpos,em)? {
-            let (r_el,r_inp)
-                = r_view.get_with_inp(rhs,rhs_inp.clone());
-            let &(ref r_trg,ref r_off) = r_el;
-            if *l_trg!=*r_trg {
+        while let Some(r) = r_it.next(&mut conds,cpos,em)? {
+            let r_trg = then(r.clone(),Element1Of2);
+            let r_off = then(r,Element2Of2);
+
+            if *l_trg.get(froml)!=*r_trg.get(fromr) {
                 panic!("Pointer subtraction of pointers pointing to different objects");
             }
-            let r_trg_sz = r_trg.num_elem();
-            let r_trg_inp = Transformation::view(0,r_trg_sz,
-                                                 r_inp.clone());
-            let r_off_inp = Transformation::view(r_trg_sz,
-                                                 r_inp.size()-r_trg_sz,
-                                                 r_inp.clone());
-            let &(Data((_,r_stat)),ref r_dyn) = r_off;
-            if l_trg_sz!=0 {
-                let f_eqs = |es:&[Em::Expr],em:&mut Em| {
-                    em.eq(es[0].clone(),es[1].clone())
-                };
-                let eqs = Transformation::zips_by_elem(
-                    Box::new(f_eqs),vec![l_trg_inp.clone(),
-                                         r_trg_inp]);
-                if l_trg_sz==1 {
-                    conds.push(eqs);
-                } else {
-                    let f = |es:&[Em::Expr],res:&mut Vec<Em::Expr>,em:&mut Em| {
-                        res.push(em.and(es.to_vec())?);
-                        Ok(())
-                    };
-                    conds.push(Transformation::map(1,Box::new(f),eqs));
-                }
-            }
-            match l_dyn {
-                &None => match r_dyn {
-                    &None => {
+            let &(Data((_,r_stat)),_) = r_off.get(fromr);
+
+            match option(then(l_off.clone(),Element2Of2),froml) {
+                None => match option(then(r_off,Element2Of2),fromr) {
+                    None => {
                         let rval = index_as_value(tp,l_stat-r_stat);
-                        let re = em.embed(Expr::Const(rval))?;
-                        let rtr = Transformation::constant(vec![re]);
+                        let re = em.value(rval)?;
                         ret = match ret {
-                            None => Some(rtr),
+                            None => Some(re),
                             Some(prev) => unimplemented!()
                         };
                     },
@@ -868,4 +858,3 @@ pub fn ptr_sub<'a,Em : Embed,S>(lhs: &BasePointer<'a>,
     }
     Ok(ret.unwrap())
 }
-*/

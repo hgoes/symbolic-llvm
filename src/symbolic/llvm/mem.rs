@@ -1,5 +1,6 @@
 use smtrs::composite::*;
 use smtrs::composite::vec::*;
+use smtrs::composite::singleton::*;
 use smtrs::embed::{Embed};
 use smtrs::expr;
 use std::cmp::{Ordering,max};
@@ -16,20 +17,24 @@ use std::marker::PhantomData;
 
 pub trait Bytes<'a>: Composite<'a> {
     fn byte_width(&self) -> usize;
-    fn extract_bytes<Em: Embed,P: Path<'a,Em,To=Self>>(
-        &P,&P::From,&[Em::Expr],
+    fn extract_bytes<Em: Embed,From,P: Path<'a,Em,From,To=Self>>(
+        &P,&From,&[Em::Expr],
         usize,usize,
         &mut Vec<Em::Expr>,
         &mut Em
-    ) -> Result<Option<Self>,Em::Error> {
+    ) -> Result<Option<Self>,Em::Error>
+        where Self: 'a {
         Ok(None)
     }
-    fn concat_bytes<Em: Embed,P1: Path<'a,Em,To=Self>,P2: Path<'a,Em,To=Self>>(
-        &P1,&P1::From,&[Em::Expr],
-        &P2,&P2::From,&[Em::Expr],
+    fn concat_bytes<Em: Embed,
+                    From1,P1: Path<'a,Em,From1,To=Self>,
+                    From2,P2: Path<'a,Em,From2,To=Self>>(
+        &P1,&From1,&[Em::Expr],
+        &P2,&From2,&[Em::Expr],
         &mut Vec<Em::Expr>,
         &mut Em
-    ) -> Result<Option<Self>,Em::Error> {
+    ) -> Result<Option<Self>,Em::Error>
+        where Self: 'a {
         Ok(None)
     }
 }
@@ -44,10 +49,14 @@ pub enum MemObj<'a,V> {
     ValueObj(V)
 }
 
+#[derive(Clone)]
+pub struct MemObjValue;
+
 #[derive(PartialEq,Eq,Hash,Clone,Debug)]
 pub struct MemSlice<'a,V>(pub CompVec<MemObj<'a,V>>);
 
-pub struct MemObjs<'a,V>(PhantomData<(&'a (),V)>);
+#[derive(Clone)]
+pub struct MemObjs;
 
 pub trait FromConst<'a>: Composite<'a> {
     fn from_const<Em: Embed>(&'a DataLayout,
@@ -72,9 +81,9 @@ impl<'a,V: Debug> Debug for MemObj<'a,V> {
     }
 }
 
-impl<'a,V : Bytes<'a>+FromConst<'a>+Clone+Debug> MemSlice<'a,V> {
-    pub fn objects() -> MemObjs<'a,V> {
-        MemObjs(PhantomData)
+impl<'a,V: 'a+Composite<'a>> MemSlice<'a,V> {
+    pub fn objects() -> MemObjs {
+        MemObjs
     }
     pub fn alloca<Em: Embed>(sz: usize,
                              res: &mut Vec<Em::Expr>,
@@ -86,13 +95,14 @@ impl<'a,V : Bytes<'a>+FromConst<'a>+Clone+Debug> MemSlice<'a,V> {
                       em)?;
         Ok(MemSlice(vec0))
     }
-    pub fn realloc<Em: Embed,P: Path<'a,Em,To=Self>>(
+    pub fn realloc<Em: Embed,From,P: Path<'a,Em,From,To=Self>>(
         path: P,
-        from: &mut P::From,
+        from: &mut From,
         arr:  &mut Vec<Em::Expr>,
         sz:   usize,
         em:   &mut Em
-    ) -> Result<(),Em::Error> {
+    ) -> Result<(),Em::Error>
+        where V: Bytes<'a>+FromConst<'a> {
         let csz = path.get(from).byte_width();
         if sz==csz {
             return Ok(())
@@ -100,7 +110,7 @@ impl<'a,V : Bytes<'a>+FromConst<'a>+Clone+Debug> MemSlice<'a,V> {
         if sz < csz {
             panic!("Making slices smaller not yet supported")
         }
-        CompVec::push(&path.then(MemSlice::objects()),
+        CompVec::push(&then(path,MemObjs),
                       from,arr,
                       MemObj::FreshObj(sz-csz),
                       &mut Vec::new(),em)
@@ -108,22 +118,24 @@ impl<'a,V : Bytes<'a>+FromConst<'a>+Clone+Debug> MemSlice<'a,V> {
     pub fn is_free(&self) -> bool {
         false
     }
-    pub fn byte_width(&self) -> usize {
+    pub fn byte_width(&self) -> usize
+        where V: Bytes<'a>+FromConst<'a> {
         let mut bw = 0;
         for i in 0..self.0.len() {
             bw += self.0[i].byte_width()
         }
         bw
     }
-    pub fn read_static<Em: Embed,P: Path<'a,Em,To=Self>>(
+    pub fn read_static<Em: Embed,From,P: Path<'a,Em,From,To=Self>>(
         path: &P,
-        from: &P::From,
+        from: &From,
         src:  &[Em::Expr],
         off: usize,
         len: usize,
         res: &mut Vec<Em::Expr>,
         em: &mut Em
-    )  -> Result<Option<V>,Em::Error> {
+    )  -> Result<Option<V>,Em::Error>
+        where V: Bytes<'a>+FromConst<'a> {
         //println!("Reading at {} with len {} from {:#?}",off,len,sl.as_ref());
         let mut buf = Vec::new();
         let mut buf2 = Vec::new();
@@ -131,7 +143,7 @@ impl<'a,V : Bytes<'a>+FromConst<'a>+Clone+Debug> MemSlice<'a,V> {
         for n in 0..path.get(from).0.len() {
             let obj_path = path.clone()
                 .then(Self::objects())
-                .then(CompVec::element(n));
+                .then(CompVecP(n));
             let bw = obj_path.get(from).byte_width();
             if off<acc+bw {
                 if off==acc && bw==len {
@@ -175,7 +187,7 @@ impl<'a,V : Bytes<'a>+FromConst<'a>+Clone+Debug> MemSlice<'a,V> {
                 for m in n..path.get(from).0.len() {
                     let obj_path = path.clone()
                         .then(Self::objects())
-                        .then(CompVec::element(m));
+                        .then(CompVecP(m));
                     let bw = obj_path.get(from).byte_width();
                     let cpos = buf.len();
                     let val = match MemObj::as_value(&obj_path,from,src,
@@ -216,19 +228,21 @@ impl<'a,V : Bytes<'a>+FromConst<'a>+Clone+Debug> MemSlice<'a,V> {
         }
         panic!("Overread") //Ok(None)
     }
-    pub fn read<Em: Embed,
-                P: Path<'a,Em,To=Self>,
-                POff: Path<'a,Em,To=Offset>>(
+    pub fn read<Em: Embed,From,
+                P: Path<'a,Em,From,To=Self>,
+                FromOff,
+                POff: Path<'a,Em,FromOff,To=Offset>>(
         path: &P,
-        from: &P::From,
+        from: &From,
         src:  &[Em::Expr],
         path_off: &POff,
-        from_off: &POff::From,
+        from_off: &FromOff,
         src_off:  &[Em::Expr],
         len: usize,
         res: &mut Vec<Em::Expr>,
         em: &mut Em
-    ) -> Result<Option<V>,Em::Error> {
+    ) -> Result<Option<V>,Em::Error>
+        where V: Bytes<'a>+FromConst<'a> {
         let off = path_off.get(from_off);
         let (mult,stat_off) = (off.0).0;
         match off.1 {
@@ -279,116 +293,117 @@ impl<'a,V : Bytes<'a>+FromConst<'a>+Clone+Debug> MemSlice<'a,V> {
                 Ok(Some((OptRef::Owned(cval.as_obj()),inp_cval)))
             }
         }
-    }
-    pub fn write_static<'b,Em : Embed>(&mut self,
-                                       inp_sl: Transf<Em>,
-                                       off: usize,
-                                       val: OptRef<'b,V>,
-                                       val_inp: Transf<Em>,
-                                       em: &mut Em)
-                                       -> Result<Option<Transf<Em>>,Em::Error> {
-        let val_sz = val.as_ref().byte_width();
+    }*/
+    pub fn write_static<From,P: Path<'a,Em,From,To=Self>,
+                        Em: Embed>(
+        path: P,
+        from: &mut From,
+        inp:  &mut Vec<Em::Expr>,
+        off: usize,
+        val: V,
+        val_inp: &mut Vec<Em::Expr>,
+        cond: Option<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error>
+        where V: Bytes<'a>+FromConst<'a> {
+        let rpath = then(path,MemObjs);
+        let val_bw = val.byte_width();
         let mut bw_acc = 0;
-        let mut acc = 0;
-        for i in 0..self.0.len() {
+        for i in 0..rpath.get(from).len() {
+            let el_path = then(rpath.clone(),
+                               CompVecP(i));
+            let bw = el_path.get(from).byte_width();
             if bw_acc > off {
                 unimplemented!()
             }
-            match self.0[i] {
-                MemObj::FreshObj(w) => {
-                    if bw_acc+w<=off {
-                        bw_acc+=w;
-                        continue
-                    }
-                    if bw_acc==off {
-                        self.0[i] = MemObj::ValueObj(val.as_obj());
-                        if val_sz != w {
-                            self.0.insert(i+1,MemObj::FreshObj(w-val_sz));
+            if bw_acc+bw<=off {
+                bw_acc+=bw;
+                continue
+            }
+            let mut old_val_inp = Vec::new();
+            let old_val = MemObj::as_value(&el_path,from,&inp[..],
+                                           &mut old_val_inp,em)?;
+            match old_val {
+                None => {
+                    // Current object is fresh
+                    el_path.set(from,inp,
+                                MemObj::ValueObj(val),
+                                val_inp,em)?;
+                    if bw_acc<off {
+                        CompVec::insert(&rpath,from,inp,i,
+                                        MemObj::FreshObj(off-bw_acc),
+                                        &mut Vec::new(),em)?;
+                        match (off-bw_acc+val_bw).cmp(&bw) {
+                            Ordering::Less => {
+                                CompVec::insert(&rpath,from,inp,i+2,
+                                                MemObj::FreshObj(bw+bw_acc-off-val_bw),
+                                                &mut Vec::new(),em)?;
+                            },
+                            Ordering::Equal => {},
+                            Ordering::Greater => unimplemented!()
                         }
-                    } else {
-                        self.0[i] = MemObj::FreshObj(off-bw_acc);
-                        self.0.insert(i+1,MemObj::ValueObj(val.as_obj()));
-                        if val_sz != w+bw_acc-off {
-                            self.0.insert(i+2,MemObj::FreshObj(w-val_sz+bw_acc-off));
+                    } else { //bw_acc==off
+                        match val_bw.cmp(&bw) {
+                            Ordering::Less => {
+                                CompVec::insert(&rpath,from,inp,i+1,
+                                                MemObj::FreshObj(bw+bw_acc-off-val_bw),
+                                                &mut Vec::new(),em)?;
+                            },
+                            Ordering::Equal => {},
+                            Ordering::Greater => unimplemented!()
                         }
                     }
-                    let before = Transformation::view(0,acc,inp_sl.clone());
-                    let after = Transformation::view(acc,
-                                                     inp_sl.size()-acc,
-                                                     inp_sl.clone());
-                    let res_inp = Transformation::concat(&[before,
-                                                           val_inp,
-                                                           after]);
-                    return Ok(Some(res_inp))
                 },
-                MemObj::ConstObj(dl,_,tp,tps) => {
-                    let w_ = dl.type_size_in_bits(tp,tps);
-                    let w = if w_%8==0 {
-                        (w_/8) as usize
-                    } else {
-                        (w_/8+1) as usize
-                    };
-                    if bw_acc+w<=off {
-                        bw_acc+=w;
-                        continue
-                    }
-                    if bw_acc==off && val_sz==w {
-                        self.0[i] = MemObj::ValueObj(val.as_obj());
-                    } else {
+                Some(rold_val) => {
+                    if val_bw!=bw {
                         unimplemented!()
                     }
-                    let before = Transformation::view(0,acc,inp_sl.clone());
-                    let after = Transformation::view(acc,
-                                                     inp_sl.size()-acc,
-                                                     inp_sl.clone());
-                    let res_inp = Transformation::concat(&[before,
-                                                           val_inp,
-                                                           after]);
-                    return Ok(Some(res_inp))
-                },
-                _ => {}
-            }
-            match self.0[i] {
-                MemObj::ValueObj(ref mut cval) => {
-                    let cval_bw = cval.byte_width();
-                    let cval_sz = cval.num_elem();
-                    if bw_acc+cval_bw<=off {
-                        bw_acc+=cval_bw;
-                        acc+=cval_sz;
-                        continue
+                    match cond {
+                        None => {
+                            el_path.set(from,inp,
+                                        MemObj::ValueObj(val),
+                                        val_inp,em)?;
+                        },
+                        Some(rcond) => {
+                            let mut nval_inp = Vec::new();
+                            let nval = ite(&rcond,
+                                           &Id,&val,&val_inp[..],
+                                           &Id,&rold_val,&old_val_inp[..],
+                                           &mut nval_inp,em)?
+                            .expect("Failed to merge when writing memory");
+                            el_path.set(from,inp,
+                                        MemObj::ValueObj(nval),
+                                        &mut nval_inp,em)?;
+                        }
                     }
-                    if bw_acc==off && cval_bw==val_sz {
-                        *cval = val.as_obj();
-                        let before = Transformation::view(0,acc,inp_sl.clone());
-                        let after = Transformation::view(acc+cval_sz,
-                                                         inp_sl.size()-acc-cval_sz,
-                                                         inp_sl.clone());
-                        let res_inp = Transformation::concat(&[before,
-                                                               val_inp,
-                                                               after]);
-                        return Ok(Some(res_inp))
-                    }
-                    unimplemented!()
-                },
-                _ => unimplemented!()
+                }
             }
+            return Ok(())
         }
-        panic!("Overwrite: {}, {:?}",off,self.0)
+        panic!("Overwrite: {}",off)
     }
-    pub fn write<'b,Em : Embed>(&mut self,
-                                inp_sl: Transf<Em>,
-                                off: OptRef<'b,Offset>,
-                                inp_off: Transf<Em>,
-                                val: OptRef<'b,V>,
-                                val_inp: Transf<Em>,
-                                em: &mut Em)
-                                -> Result<Option<Transf<Em>>,Em::Error> {
-        let (mult,stat_off) = (off.as_ref().0).0;
-        match off.as_ref().1 {
-            None => self.write_static(inp_sl,stat_off,val,val_inp,em),
+    pub fn write<From,P: Path<'a,Em,From,To=Self>,
+                 FromOff,POff: Path<'a,Em,FromOff,To=Offset>,
+                 Em: Embed>(
+        path: P,
+        from: &mut From,
+        inp: &mut Vec<Em::Expr>,
+        off: &POff,
+        from_off: &FromOff,
+        inp_off: &[Em::Expr],
+        val: V,
+        val_inp: &mut Vec<Em::Expr>,
+        cond: Option<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error>
+        where V: Bytes<'a>+FromConst<'a> {
+        let &(Data((mult,stat_off)),ref dyn) = off.get(from_off);
+        match dyn {
+            &None => Self::write_static(path,from,inp,
+                                        stat_off,val,val_inp,cond,em),
             _ => unimplemented!()
         }
-    }*/          
+    }        
 }
 
 impl<'a,V: HasSorts> HasSorts for MemObj<'a,V> {
@@ -408,7 +423,7 @@ impl<'a,V: HasSorts> HasSorts for MemObj<'a,V> {
     }
 }
 
-impl<'a,V: Bytes<'a>+FromConst<'a>> MemObj<'a,V> {
+impl<'a,V: 'a+Bytes<'a>+FromConst<'a>> MemObj<'a,V> {
     pub fn byte_width(&self) -> usize {
         match self {
             &MemObj::FreshObj(w) => w,
@@ -423,9 +438,9 @@ impl<'a,V: Bytes<'a>+FromConst<'a>> MemObj<'a,V> {
             &MemObj::ValueObj(ref v) => v.byte_width()
         }
     }
-    pub fn as_value<'b,Em: Embed,P: Path<'b,Em,To=Self>>(
+    pub fn as_value<Em: Embed,From,P: Path<'a,Em,From,To=Self>>(
         path: &P,
-        from: &P::From,
+        from: &From,
         arr:  &[Em::Expr],
         res:  &mut Vec<Em::Expr>,
         em: &mut Em)
@@ -458,18 +473,19 @@ impl<'a,V : HasSorts> HasSorts for MemSlice<'a,V> {
     }
 }
 
-impl<'a,V: Bytes<'a>+FromConst<'a>+Debug> Composite<'a> for MemSlice<'a,V> {
-    fn combine<Em,PL,PR,FComb,FL,FR>(
-        pl: &PL,froml: &PL::From,arrl: &[Em::Expr],
-        pr: &PR,fromr: &PR::From,arrr: &[Em::Expr],
+impl<'a,V: Bytes<'a>+FromConst<'a>> Composite<'a> for MemSlice<'a,V> {
+    fn combine<Em,FromL,PL,FromR,PR,FComb,FL,FR>(
+        pl: &PL,froml: &FromL,arrl: &[Em::Expr],
+        pr: &PR,fromr: &FromR,arrr: &[Em::Expr],
         comb: &FComb,only_l: &FL,only_r: &FR,
         res: &mut Vec<Em::Expr>,
         em: &mut Em)
         -> Result<Option<Self>,Em::Error>
         where
+        Self: 'a,
         Em: Embed,
-        PL: Path<'a,Em,To=Self>,
-        PR: Path<'a,Em,To=Self>,
+        PL: Path<'a,Em,FromL,To=Self>,
+        PR: Path<'a,Em,FromR,To=Self>,
         FComb: Fn(Em::Expr,Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
         FL: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error>,
         FR: Fn(Em::Expr,&mut Em) -> Result<Em::Expr,Em::Error> {
@@ -504,9 +520,9 @@ impl<'a,V: Bytes<'a>+FromConst<'a>+Debug> Composite<'a> for MemSlice<'a,V> {
                         }
                         for i in pos_y..rhs.0.len() {
                             let cpos = res.len();
-                            let path_el = pr.clone()
-                                .then(Self::objects())
-                                .then(CompVec::element(i));
+                            let path_el = then(then(pr.clone(),
+                                                    MemObjs),
+                                               CompVecP(i));
                             let el = path_el.get(fromr);
                             path_el.read_into(fromr,0,el.num_elem(),arrr,res,em)?;
                             for i in cpos..res.len() {
@@ -517,7 +533,7 @@ impl<'a,V: Bytes<'a>+FromConst<'a>+Debug> Composite<'a> for MemSlice<'a,V> {
                     }
                     let path_el = pl.clone()
                         .then(Self::objects())
-                        .then(CompVec::element(pos_x));
+                        .then(CompVecP(pos_x));
                     let el = path_el.get(froml);
                     let len = el.num_elem();
                     path_el.read_into(froml,0,len,arrl,&mut buf_x,em)?;
@@ -536,7 +552,7 @@ impl<'a,V: Bytes<'a>+FromConst<'a>+Debug> Composite<'a> for MemSlice<'a,V> {
                             let cpos = res.len();
                             let path_el = pl.clone()
                                 .then(Self::objects())
-                                .then(CompVec::element(i));
+                                .then(CompVecP(i));
                             let el = path_el.get(froml);
                             path_el.read_into(froml,0,el.num_elem(),arrl,res,em)?;
                             for i in cpos..res.len() {
@@ -547,7 +563,7 @@ impl<'a,V: Bytes<'a>+FromConst<'a>+Debug> Composite<'a> for MemSlice<'a,V> {
                     }
                     let path_el = pr.clone()
                         .then(Self::objects())
-                        .then(CompVec::element(pos_y));
+                        .then(CompVecP(pos_y));
                     let el = path_el.get(fromr);
                     let len = el.num_elem();
                     path_el.read_into(fromr,0,len,arrr,&mut buf_y,em)?;
@@ -882,7 +898,7 @@ impl<'b,V> Semantic for MemObj<'b,V>
     }
 }
 
-impl<'b,V : Semantic+Bytes<'b>+FromConst<'b>> Semantic for MemSlice<'b,V> {
+impl<'b,V: Semantic+Bytes<'b>+FromConst<'b>> Semantic for MemSlice<'b,V> {
     type Meaning = VecMeaning<V::Meaning>;
     type MeaningCtx = V::MeaningCtx;
     fn meaning(&self,n: usize) -> Self::Meaning {
@@ -900,48 +916,42 @@ impl<'b,V : Semantic+Bytes<'b>+FromConst<'b>> Semantic for MemSlice<'b,V> {
     }
 }
 
-impl<'a,V> Clone for MemObjs<'a,V> {
-    fn clone(&self) -> Self {
-        MemObjs(PhantomData)
-    }
-}
-
-impl<'a,V: 'a> SimplePathEl<'a> for MemObjs<'a,V> {
-    type From = MemSlice<'a,V>;
-    type To   = CompVec<MemObj<'a,V>>;
-    fn get<'c>(&self,from: &'c Self::From) -> &'c Self::To where 'a: 'c {
+impl<'a,V: 'a> SimplePathEl<'a,MemSlice<'a,V>> for MemObjs {
+    type To = CompVec<MemObj<'a,V>>;
+    fn get<'c>(&self,from: &'c MemSlice<'a,V>) -> &'c Self::To where 'a: 'c {
         &from.0
     }
-    fn get_mut<'c>(&self,from: &'c mut Self::From) -> &'c mut Self::To where 'a: 'c {
+    fn get_mut<'c>(&self,from: &'c mut MemSlice<'a,V>)
+                   -> &'c mut Self::To where 'a: 'c {
         &mut from.0
     }
 }
 
-impl<'a,Em: Embed,V: 'a> PathEl<'a,Em> for MemObjs<'a,V> {
-    fn read<Prev: Path<'a,Em,To=Self::From>>(
+impl<'a,Em: Embed,V: 'a> PathEl<'a,Em,MemSlice<'a,V>> for MemObjs {
+    fn read<PrevFrom,Prev: Path<'a,Em,PrevFrom,To=MemSlice<'a,V>>>(
         &self,
         prev: &Prev,
-        prev_from: &Prev::From,
+        prev_from: &PrevFrom,
         pos: usize,
         arr: &[Em::Expr],
         em: &mut Em)
         -> Result<Em::Expr,Em::Error> {
         prev.read(prev_from,pos,arr,em)
     }
-    fn read_slice<'c,Prev: Path<'a,Em,To=Self::From>>(
+    fn read_slice<'c,PrevFrom,Prev: Path<'a,Em,PrevFrom,To=MemSlice<'a,V>>>(
         &self,
         prev: &Prev,
-        prev_from: &Prev::From,
+        prev_from: &PrevFrom,
         pos: usize,
         len: usize,
         arr: &'c [Em::Expr])
         -> Option<&'c [Em::Expr]> {
         prev.read_slice(prev_from,pos,len,arr)
     }
-    fn write<Prev: Path<'a,Em,To=Self::From>>(
+    fn write<PrevFrom,Prev: Path<'a,Em,PrevFrom,To=MemSlice<'a,V>>>(
         &self,
         prev: &Prev,
-        prev_from: &Prev::From,
+        prev_from: &PrevFrom,
         pos: usize,
         e: Em::Expr,
         arr: &mut Vec<Em::Expr>,
@@ -949,10 +959,73 @@ impl<'a,Em: Embed,V: 'a> PathEl<'a,Em> for MemObjs<'a,V> {
         -> Result<(),Em::Error> {
         prev.write(prev_from,pos,e,arr,em)
     }
-    fn write_slice<Prev: Path<'a,Em,To=Self::From>>(
+    fn write_slice<PrevFrom,Prev: Path<'a,Em,PrevFrom,To=MemSlice<'a,V>>>(
         &self,
         prev: &Prev,
-        prev_from: &mut Prev::From,
+        prev_from: &mut PrevFrom,
+        pos: usize,
+        old_len: usize,
+        src: &mut Vec<Em::Expr>,
+        trg: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write_slice(prev_from,pos,old_len,src,trg,em)
+    }
+}
+
+impl<'a,V: 'a> SimplePathEl<'a,MemObj<'a,V>> for MemObjValue {
+    type To = V;
+    fn get<'c>(&self,from: &'c MemObj<'a,V>) -> &'c Self::To where 'a: 'c {
+        match from {
+            &MemObj::ValueObj(ref v) => v,
+            _ => panic!("Value path for non-value object")
+        }
+    }
+    fn get_mut<'c>(&self,from: &'c mut MemObj<'a,V>)
+                   -> &'c mut Self::To where 'a: 'c {
+        match from {
+            &mut MemObj::ValueObj(ref mut v) => v,
+            _ => panic!("Value path for non-value object")
+        }
+    }
+}
+
+impl<'a,Em: Embed,V: 'a> PathEl<'a,Em,MemObj<'a,V>> for MemObjValue {
+    fn read<PrevFrom,Prev: Path<'a,Em,PrevFrom,To=MemObj<'a,V>>>(
+        &self,
+        prev: &Prev,
+        prev_from: &PrevFrom,
+        pos: usize,
+        arr: &[Em::Expr],
+        em: &mut Em)
+        -> Result<Em::Expr,Em::Error> {
+        prev.read(prev_from,pos,arr,em)
+    }
+    fn read_slice<'c,PrevFrom,Prev: Path<'a,Em,PrevFrom,To=MemObj<'a,V>>>(
+        &self,
+        prev: &Prev,
+        prev_from: &PrevFrom,
+        pos: usize,
+        len: usize,
+        arr: &'c [Em::Expr])
+        -> Option<&'c [Em::Expr]> {
+        prev.read_slice(prev_from,pos,len,arr)
+    }
+    fn write<PrevFrom,Prev: Path<'a,Em,PrevFrom,To=MemObj<'a,V>>>(
+        &self,
+        prev: &Prev,
+        prev_from: &PrevFrom,
+        pos: usize,
+        e: Em::Expr,
+        arr: &mut Vec<Em::Expr>,
+        em: &mut Em)
+        -> Result<(),Em::Error> {
+        prev.write(prev_from,pos,e,arr,em)
+    }
+    fn write_slice<PrevFrom,Prev: Path<'a,Em,PrevFrom,To=MemObj<'a,V>>>(
+        &self,
+        prev: &Prev,
+        prev_from: &mut PrevFrom,
         pos: usize,
         old_len: usize,
         src: &mut Vec<Em::Expr>,

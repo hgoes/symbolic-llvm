@@ -8,6 +8,7 @@ use smtrs::composite::*;
 use smtrs::composite::vec::*;
 use smtrs::composite::singleton::*;
 use smtrs::composite::choice::*;
+use smtrs::composite::map::*;
 use smtrs::embed::{Embed,DeriveValues};
 use smtrs::types::{Value};
 use num_bigint::BigUint;
@@ -16,16 +17,16 @@ use llvm_ir::datalayout::DataLayout;
 use std::fmt::Debug;
 
 pub trait Library<'a,V : 'a+Bytes<'a>+FromConst<'a>,Em : Embed> {
-    fn call<Arg: Path<'a,Em,To=CompVec<V>>,
-            Ret: Path<'a,Em,From=Program<'a,V>,To=V>
+    fn call<FromArg,Arg: Path<'a,Em,FromArg,To=CompVec<V>>,
+            Ret: Path<'a,Em,Program<'a,V>,To=Assoc<&'a String,V>>
             >(&self,
               &'a String,
-              &Arg,&Arg::From,&[Em::Expr],
-              Option<&Ret>,
+              &Arg,&FromArg,&[Em::Expr],
+              Option<(Ret,&'a String)>,
               &'a DataLayout,
               InstructionRef<'a>,
               &mut Program<'a,V>,&mut Vec<Em::Expr>,
-              &[Em::Expr],
+              &mut Vec<Em::Expr>,
               &mut Em)
               -> Result<bool,Em::Error>;
 }
@@ -33,24 +34,24 @@ pub trait Library<'a,V : 'a+Bytes<'a>+FromConst<'a>,Em : Embed> {
 pub struct StdLib {}
 
 impl<'a,V: 'a+Bytes<'a>+FromConst<'a>+IntValue<'a>+Pointer<'a>+Debug,Em: DeriveValues> Library<'a,V,Em> for StdLib {
-    fn call<Arg: Path<'a,Em,To=CompVec<V>>,
-            Ret: Path<'a,Em,From=Program<'a,V>,To=V>
+    fn call<FromArg,Arg: Path<'a,Em,FromArg,To=CompVec<V>>,
+            Ret: Path<'a,Em,Program<'a,V>,To=Assoc<&'a String,V>>
             >(&self,
               name: &'a String,
               args: &Arg,
-              args_from: &Arg::From,
+              args_from: &FromArg,
               args_arr: &[Em::Expr],
-              ret: Option<&Ret>,
+              ret: Option<(Ret,&'a String)>,
               dl: &'a DataLayout,
               instr_id: InstructionRef<'a>,
               prog: &mut Program<'a,V>,
               prog_arr: &mut Vec<Em::Expr>,
-              conds: &[Em::Expr],
+              conds: &mut Vec<Em::Expr>,
               em: &mut Em)
               -> Result<bool,Em::Error> {
         match name.as_ref() {
             "malloc" => {
-                let sz = args.clone().then(CompVec::element(0));
+                let sz = then(args.clone(),CompVecP(0));
                 let mut rsz_inp = Vec::new();
                 let rsz = V::to_offset(&sz,args_from,args_arr,&mut rsz_inp,em)?;
                 let csz = Singleton::get(&Id::new(),&rsz,&rsz_inp[..],em)?;
@@ -63,14 +64,14 @@ impl<'a,V: 'a+Bytes<'a>+FromConst<'a>+IntValue<'a>+Pointer<'a>+Debug,Em: DeriveV
                 let mut sl_inp = Vec::new();
                 let sl: MemSlice<'a,V> = MemSlice::alloca(stat_sz,&mut sl_inp,em)?;
                 // Insert slice into heap
-                let heap_path: Then<Id<Program<'a,V>>,HeapPath<'a,V>> = Program::heap().path();
-                let sls = Heap::lookup_or_insert(heap_path,
-                                                 prog,prog_arr,
-                                                 instr_id,
-                                                 |arr,em| CompVec::new(arr,em),
-                                                 em)?;
+                let heap_path: Then<Id,HeapPath> = then(Id,HeapPath);
+                let (_,sls) = Heap::lookup_or_insert(heap_path,
+                                                     prog,prog_arr,
+                                                     instr_id,
+                                                     |arr,em| CompVec::new(arr,em),
+                                                     em)?;
                 let sl_idx = CompVec::alloc(&sls,prog,prog_arr,sl,&mut sl_inp,&|_,_,_,_| Ok(false),em)?;
-                let rsl_idx = em.const_bitvec(INDEX_WIDTH,BigUint::from(sl_idx))?;
+                let rsl_idx = em.const_bitvec(INDEX_WIDTH,BigUint::from(sl_idx.0))?;
                 // Generate the new pointer
                 let mut trg_inp = Vec::new();
                 let trg = PointerTrg::heap(instr_id,rsl_idx,&mut trg_inp,em)?;
@@ -96,15 +97,101 @@ impl<'a,V: 'a+Bytes<'a>+FromConst<'a>+IntValue<'a>+Pointer<'a>+Debug,Em: DeriveV
                                            &Id::new(),&ptr,&ptr_inp[..],&mut rval_inp,em)?;
 
                 if conds.len()==0 {
-                    rret.set(prog,prog_arr,rval,&mut rval_inp,em)?;
+                    Assoc::insert(&rret.0,prog,prog_arr,rret.1,
+                                  rval,&mut rval_inp,em)?;
                 } else {
                     let rcond = em.and(conds.to_vec())?;
-                    if !rret.set_cond(prog,prog_arr,rval,&mut rval_inp,&rcond,em)? {
-                        panic!("Cannot merge return value")
-                    }
+                    Assoc::insert_cond(rret.0,prog,prog_arr,rret.1,
+                                       rval,&mut rval_inp,&rcond,em)?;
                 }
                 Ok(true)
             },
+            /*"realloc" => {
+                let ptr = args.clone().then(CompVec::element(0));
+                let ptr_inp = ptr.read_slice(args_from,0,
+                                             ptr.get(args_from).num_elem(),
+                                             args_arr)?.to_vec();
+                
+                // Insert the pointer
+                let rret = match ret_view {
+                    None => panic!("realloc without return"),
+                    Some(r) => r
+                };
+                if conds.len()==0 {
+                    rret.set(prog,prog_arr,
+                             ptr.get(args_from).clone(),
+                             &mut ptr_inp,em)?;
+                } else {
+                    let rcond = em.and(conds.to_vec())?;
+                    if !rret.set_cond(prog,prog_arr,
+                                      ptr.get(args_from).clone(),
+                                      &mut ptr_inp,em)? {
+                        panic!("Cannot merge return value")
+                    }
+                }
+
+                let sz = args.clone().then(CompVec::element(1));
+                let mut rsz_inp = Vec::new();
+                let rsz = V::to_offset(&sz,args_from,args_arr,&mut rsz_inp,em)?;
+
+                let rptr_inp = Vec::new();
+                let rptr = match V::to_pointer(&ptr,args_from,args_arr,
+                                               &mut rptr_inp,em)? {
+                    None => panic!("Argument to realloc not a pointer"),
+                    Some(r) => r
+                };
+                let csz = Singleton::get(&Id::new(),&rsz,&rsz_inp[..],em)?;
+                let stat_sz = match em.derive_const(&csz)? {
+                    Some(Value::BitVec(_,rv)) => rv.to_usize().unwrap(),
+                    Some(c) => panic!("Construct realloc size from: {:?}",c),
+                    None => panic!("Dynamic realloc not supported")
+                };
+
+                let mut ptr_iter = Choice::choices(&Id::new(),
+                                                   rptr,&rptr_inp[..]);
+
+                let cpos = conds.len();
+                while let Some(base_path) = ptr_iter.next(conds,cpos,em)? {
+                    let (trg_off,trg_off_inp)
+                        = base_view.get_with_inp(rptr.as_ref(),
+                                                 rptr_inp.clone());
+                    let &(ref trg,ref off) = trg_off;
+                    let trg_sz = trg.num_elem();
+                    let trg_inp = Transformation::view(0,trg_sz,trg_off_inp.clone());
+                    let off_inp = Transformation::view(trg_sz,trg_off_inp.size()-trg_sz,trg_off_inp);
+                    let mut lookup_iter : MemLookups<V,Em>
+                        = MemLookups::new(trg,
+                                          trg_inp,
+                                          &prog,
+                                          exprs,
+                                          em)?;
+                    let cpos = conds.len();
+                    while let Some(lookup) = lookup_iter.next(conds,cpos,em)? {
+                        let pview = match lookup {
+                            MemLookup::Slice(pview) => pview,
+                            _ => panic!("realloc target not an allocation")
+                        };
+                        let sl = pview.get_el_mut(nprog);
+                        sl.realloc(stat_sz);
+                    }
+                }
+                conds.truncate(cpos);
+                Ok(true)
+            },
+            x if x.starts_with("llvm.dbg.") => {
+                Ok(true)
+            },
+            x if x.starts_with("llvm.expect.") => {
+                let (val,val_inp) = get_vec_elem(0,OptRef::Ref(args),
+                                                 args_inp.clone())?;
+                let rret = match ret_view {
+                    None => panic!("llvm.expect without return"),
+                    Some(r) => r
+                };
+                rret.insert_cond(nprog,val.as_obj(),val_inp,
+                                 conds,updates,prog_inp,em)?;
+                Ok(true)
+            },*/
             _ => Ok(false)
         }
     }
