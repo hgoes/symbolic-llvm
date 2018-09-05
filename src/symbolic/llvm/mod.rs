@@ -350,10 +350,10 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
     em: &mut Em)
     -> Result<(Program<'b,V>,
                Transf<Em>),TrErr<'b,V,Em::Error>>
-    where V : 'b+Bytes+FromConst<'b>+IntValue+Vector+Pointer<'b>+FromMD<'b>+Debug,
-          Cfg : TranslationCfg<Em>,
-          Lib : Library<'b,V,Em>,
-          Em : DeriveValues {
+    where V: 'b+Bytes+FromConst<'b>+IntValue+Vector+Pointer<'b>+FromMD<'b>+Debug,
+          Cfg: TranslationCfg<Em>+?Sized,
+          Lib: Library<'b,V,Em>,
+          Em: DeriveValues {
     debug_assert_eq!(prog.num_elem(),prog_inp.size());
     debug_assert_eq!(inp.num_elem(),inp_inp.size());
     let (step,thr_idx) = if prog.is_single_threaded() {
@@ -1191,7 +1191,7 @@ pub fn translate_instr<'b,V,Cfg,Lib,Em>(
                                                           &m.types,
                                                           call_frame,call_frame_inp.clone(),
                                                           exprs,em)?;
-                        let cond = V::icmp(op,
+                        let cond = V::icmp(op.clone(),
                                            &vl,vl_inp,
                                            &vr,vr_inp,em)?;
                         let (ret,ret_inp) = V::from_bool(cond)?;
@@ -1581,8 +1581,8 @@ fn translate_global_<'b,V>(dl: &'b DataLayout,
     }
 }
 
-pub trait IntValue : Composite {
-    fn const_int<Em : Embed>(u64,BigUint,&mut Em) -> Result<(Self,Vec<Em::Expr>),Em::Error>;
+pub trait IntValue: Composite {
+    fn const_int<Em: Embed>(u64,BigUint,&mut Em) -> Result<(Self,Vec<Em::Expr>),Em::Error>;
     fn bin<'b,Em>(op: &llvm_ir::BinOp,
                   lhs: &Self,
                   rhs: &Self,
@@ -1601,16 +1601,16 @@ pub trait IntValue : Composite {
     fn trunc<'a,Em>(OptRef<'a,Self>,Transf<Em>,usize,&mut Em)
                    -> (OptRef<'a,Self>,Transf<Em>)
         where Em : Embed;
-    fn icmp<Em>(&llvm_ir::CmpOp,
+    fn icmp<Em>(llvm_ir::CmpOp,
                 &Self,Transf<Em>,
                 &Self,Transf<Em>,
                 &mut Em)
                 -> Result<Transf<Em>,Em::Error>
         where Em : Embed;
-    fn from_bool<Em : Embed>(Transf<Em>) -> Result<(Self,Transf<Em>),Em::Error>;
-    fn to_bool<'a,Em : Embed>(OptRef<'a,Self>,Transf<Em>) -> Result<Transf<Em>,Em::Error>;
-    fn to_offset<'a,Em : Embed>(OptRef<'a,Self>,Transf<Em>) -> (Singleton,Transf<Em>);
-    fn from_offset<'a,Em : Embed>(usize,&Singleton,Transf<Em>)
+    fn from_bool<Em: Embed>(Transf<Em>) -> Result<(Self,Transf<Em>),Em::Error>;
+    fn to_bool<'a,Em: Embed>(OptRef<'a,Self>,Transf<Em>) -> Result<Transf<Em>,Em::Error>;
+    fn to_offset<'a,Em: Embed>(OptRef<'a,Self>,Transf<Em>) -> (Singleton,Transf<Em>);
+    fn from_offset<'a,Em: Embed>(usize,&Singleton,Transf<Em>)
                                   -> (Self,Transf<Em>);
 }
 
@@ -2555,7 +2555,7 @@ impl IntValue for BitVecValue {
             }
         }
     }
-    fn icmp<Em>(op: &llvm_ir::CmpOp,
+    fn icmp<Em>(op: llvm_ir::CmpOp,
                 lhs: &Self,lhs_inp: Transf<Em>,
                 rhs: &Self,rhs_inp: Transf<Em>,
                 em: &mut Em)
@@ -2565,25 +2565,25 @@ impl IntValue for BitVecValue {
             &BitVecValue::BoolValue(_) => match rhs {
                 &BitVecValue::BoolValue(_) => {
                     let f : Box<for <'b,'c> Fn(&'b [Em::Expr], &'c mut Em) -> Result<Em::Expr, Em::Error>> = match op {
-                        &llvm_ir::CmpOp::Eq => Box::new(|es: &[Em::Expr],em: &mut Em| {
+                        llvm_ir::CmpOp::Eq => Box::new(|es: &[Em::Expr],em: &mut Em| {
                             em.eq(es[0].clone(),es[1].clone())
                         }),
-                        &llvm_ir::CmpOp::Ne => Box::new(|es: &[Em::Expr],em: &mut Em| {
+                        llvm_ir::CmpOp::Ne => Box::new(|es: &[Em::Expr],em: &mut Em| {
                             let eq = em.eq(es[0].clone(),es[1].clone())?;
                             em.not(eq)
                         }),
-                        &llvm_ir::CmpOp::SGe |
-                        &llvm_ir::CmpOp::UGe => Box::new(|es: &[Em::Expr],em: &mut Em| {
+                        llvm_ir::CmpOp::SGe |
+                        llvm_ir::CmpOp::UGe => Box::new(|es: &[Em::Expr],em: &mut Em| {
                             let n = em.not(es[1].clone())?;
                             em.or(vec![es[0].clone(),n])
                         }),
-                        &llvm_ir::CmpOp::SGt |
-                        &llvm_ir::CmpOp::UGt => Box::new(|es: &[Em::Expr],em: &mut Em| {
+                        llvm_ir::CmpOp::SGt |
+                        llvm_ir::CmpOp::UGt => Box::new(|es: &[Em::Expr],em: &mut Em| {
                             let n = em.not(es[1].clone())?;
                             em.and(vec![es[0].clone(),n])
                         }),
-                        &llvm_ir::CmpOp::SLt |
-                        &llvm_ir::CmpOp::ULt => Box::new(|es: &[Em::Expr],em: &mut Em| {
+                        llvm_ir::CmpOp::SLt |
+                        llvm_ir::CmpOp::ULt => Box::new(|es: &[Em::Expr],em: &mut Em| {
                             let n = em.not(es[0].clone())?;
                             em.and(vec![n,es[1].clone()])
                         }),
@@ -2593,32 +2593,32 @@ impl IntValue for BitVecValue {
                 },
                 &BitVecValue::BitVecValue(bw) => {
                     let f : Box<for <'b,'c> Fn(&'b [Em::Expr], &'c mut Em) -> Result<Em::Expr, Em::Error>> = match op {
-                        &llvm_ir::CmpOp::Eq => Box::new(move |es: &[Em::Expr],em: &mut Em| {
+                        llvm_ir::CmpOp::Eq => Box::new(move |es: &[Em::Expr],em: &mut Em| {
                             let one = em.const_bitvec(bw,BigUint::from(1 as u8))?;
                             let zero = em.const_bitvec(bw,BigUint::from(0 as u8))?;
                             let l = em.ite(es[0].clone(),one,zero)?;
                             em.eq(l,es[1].clone())
                         }),
-                        &llvm_ir::CmpOp::Ne => Box::new(move |es: &[Em::Expr],em: &mut Em| {
+                        llvm_ir::CmpOp::Ne => Box::new(move |es: &[Em::Expr],em: &mut Em| {
                             let one = em.const_bitvec(bw,BigUint::from(1 as u8))?;
                             let zero = em.const_bitvec(bw,BigUint::from(0 as u8))?;
                             let l = em.ite(es[0].clone(),one,zero)?;
                             let eq = em.eq(l,es[1].clone())?;
                             em.not(eq)
                         }),
-                        &llvm_ir::CmpOp::SGe => Box::new(move |es: &[Em::Expr],em: &mut Em| {
+                        llvm_ir::CmpOp::SGe => Box::new(move |es: &[Em::Expr],em: &mut Em| {
                             let one = em.const_bitvec(bw,BigUint::from(1 as u8))?;
                             let zero = em.const_bitvec(bw,BigUint::from(0 as u8))?;
                             let l = em.ite(es[0].clone(),one,zero)?;
                             em.bvsge(l,es[1].clone())
                         }),
-                        &llvm_ir::CmpOp::SLt => Box::new(move |es: &[Em::Expr],em: &mut Em| {
+                        llvm_ir::CmpOp::SLt => Box::new(move |es: &[Em::Expr],em: &mut Em| {
                             let one = em.const_bitvec(bw,BigUint::from(1 as u8))?;
                             let zero = em.const_bitvec(bw,BigUint::from(0 as u8))?;
                             let l = em.ite(es[0].clone(),one,zero)?;
                             em.bvslt(l,es[1].clone())
                         }),
-                        &llvm_ir::CmpOp::SLe => Box::new(move |es: &[Em::Expr],em: &mut Em| {
+                        llvm_ir::CmpOp::SLe => Box::new(move |es: &[Em::Expr],em: &mut Em| {
                             let one = em.const_bitvec(bw,BigUint::from(1 as u8))?;
                             let zero = em.const_bitvec(bw,BigUint::from(0 as u8))?;
                             let l = em.ite(es[0].clone(),one,zero)?;
@@ -2633,23 +2633,23 @@ impl IntValue for BitVecValue {
                 &BitVecValue::BitVecValue(bwr) => {
                     debug_assert_eq!(bwl,bwr);
                     let f : Box<for <'b,'c> Fn(&'b [Em::Expr], &'c mut Em) -> Result<Em::Expr, Em::Error>> = match op {
-                        &llvm_ir::CmpOp::Eq => Box::new(|es: &[Em::Expr],em: &mut Em| {
+                        llvm_ir::CmpOp::Eq => Box::new(|es: &[Em::Expr],em: &mut Em| {
                             em.eq(es[0].clone(),es[1].clone())
                         }),
-                        &llvm_ir::CmpOp::Ne => Box::new(|es: &[Em::Expr],em: &mut Em| {
+                        llvm_ir::CmpOp::Ne => Box::new(|es: &[Em::Expr],em: &mut Em| {
                             let eq = em.eq(es[0].clone(),es[1].clone())?;
                             em.not(eq)
                         }),
-                        &llvm_ir::CmpOp::SGe => Box::new(|es: &[Em::Expr],em: &mut Em| {
+                        llvm_ir::CmpOp::SGe => Box::new(|es: &[Em::Expr],em: &mut Em| {
                             em.bvsge(es[0].clone(),es[1].clone())
                         }),
-                        &llvm_ir::CmpOp::SGt => Box::new(|es: &[Em::Expr],em: &mut Em| {
+                        llvm_ir::CmpOp::SGt => Box::new(|es: &[Em::Expr],em: &mut Em| {
                             em.bvsgt(es[0].clone(),es[1].clone())
                         }),
-                        &llvm_ir::CmpOp::SLe => Box::new(|es: &[Em::Expr],em: &mut Em| {
+                        llvm_ir::CmpOp::SLe => Box::new(|es: &[Em::Expr],em: &mut Em| {
                             em.bvsle(es[0].clone(),es[1].clone())
                         }),
-                        &llvm_ir::CmpOp::SLt => Box::new(|es: &[Em::Expr],em: &mut Em| {
+                        llvm_ir::CmpOp::SLt => Box::new(|es: &[Em::Expr],em: &mut Em| {
                             em.bvslt(es[0].clone(),es[1].clone())
                         }),
                         _ => panic!("ICmp {:?} not implemented",op)
@@ -2658,34 +2658,28 @@ impl IntValue for BitVecValue {
                 },
                 &BitVecValue::BoolValue(bwr) => {
                     debug_assert_eq!(bwl,bwr);
-                    let f : Box<for <'b,'c> Fn(&'b [Em::Expr], &'c mut Em) -> Result<Em::Expr, Em::Error>> = match op {
-                        &llvm_ir::CmpOp::Eq => Box::new(move |es: &[Em::Expr],em: &mut Em| {
+                    let f : Box<for <'b,'c> Fn(&'b [Em::Expr], &'c mut Em) -> Result<Em::Expr, Em::Error>>
+                        = Box::new(move |es: &[Em::Expr],em: &mut Em| {
                             let one = em.const_bitvec(bwl,BigUint::from(1 as u8))?;
                             let zero = em.const_bitvec(bwl,BigUint::from(0 as u8))?;
                             let r = em.ite(es[1].clone(),one,zero)?;
-                            em.eq(es[0].clone(),r)
-                        }),
-                        &llvm_ir::CmpOp::Ne => Box::new(move |es: &[Em::Expr],em: &mut Em| {
-                            let one = em.const_bitvec(bwl,BigUint::from(1 as u8))?;
-                            let zero = em.const_bitvec(bwl,BigUint::from(0 as u8))?;
-                            let r = em.ite(es[1].clone(),one,zero)?;
-                            let eq = em.eq(es[0].clone(),r)?;
-                            em.not(eq)
-                        }),
-                        &llvm_ir::CmpOp::SGe => Box::new(move |es: &[Em::Expr],em: &mut Em| {
-                            let one = em.const_bitvec(bwl,BigUint::from(1 as u8))?;
-                            let zero = em.const_bitvec(bwl,BigUint::from(0 as u8))?;
-                            let r = em.ite(es[1].clone(),one,zero)?;
-                            em.bvsge(es[0].clone(),r)
-                        }),
-                        &llvm_ir::CmpOp::SGt => Box::new(move |es: &[Em::Expr],em: &mut Em| {
-                            let one = em.const_bitvec(bwl,BigUint::from(1 as u8))?;
-                            let zero = em.const_bitvec(bwl,BigUint::from(0 as u8))?;
-                            let r = em.ite(es[1].clone(),one,zero)?;
-                            em.bvsgt(es[0].clone(),r)
-                        }),
-                        _ => panic!("ICmp {:?} not implemented",op)
-                    };
+                            match op {
+                                llvm_ir::CmpOp::Eq => em.eq(es[0].clone(),r),
+                                llvm_ir::CmpOp::Ne => {
+                                    let eq = em.eq(es[0].clone(),r)?;
+                                    em.not(eq)
+                                },
+                                llvm_ir::CmpOp::SLe => em.bvsle(es[0].clone(),r),
+                                llvm_ir::CmpOp::ULe => em.bvule(es[0].clone(),r),
+                                llvm_ir::CmpOp::SGe => em.bvsge(es[0].clone(),r),
+                                llvm_ir::CmpOp::UGe => em.bvuge(es[0].clone(),r),
+                                llvm_ir::CmpOp::SLt => em.bvslt(es[0].clone(),r),
+                                llvm_ir::CmpOp::ULt => em.bvult(es[0].clone(),r),
+                                llvm_ir::CmpOp::SGt => em.bvsgt(es[0].clone(),r),
+                                llvm_ir::CmpOp::UGt => em.bvugt(es[0].clone(),r),
+                                _ => panic!("ICmp {:?} not implemented",op)
+                            }
+                        });
                     Ok(Transformation::zips_by_elem(f,vec![lhs_inp,rhs_inp]))
                 }
             }
@@ -3038,7 +3032,7 @@ impl<'c,Ptr : Pointer<'c>+Bytes+Clone,V : IntValue+Bytes+Clone> IntValue for Com
         (OptRef::Owned(nx),ninp)
     }
 
-    fn icmp<Em>(op: &llvm_ir::CmpOp,
+    fn icmp<Em>(op: llvm_ir::CmpOp,
                 lhs: &Self,lhs_inp: Transf<Em>,
                 rhs: &Self,rhs_inp: Transf<Em>,
                 em: &mut Em)
@@ -3054,13 +3048,13 @@ impl<'c,Ptr : Pointer<'c>+Bytes+Clone,V : IntValue+Bytes+Clone> IntValue for Com
             &CompValue::Pointer(ref pl) => match rhs {
                 &CompValue::Pointer(ref pr)
                     => match op {
-                        &llvm_ir::CmpOp::Eq => Ok(BitField::ptr_eq(pl,lhs_inp,
-                                                                   pr,rhs_inp)),
-                        &llvm_ir::CmpOp::Ne
+                        llvm_ir::CmpOp::Eq => Ok(BitField::ptr_eq(pl,lhs_inp,
+                                                                  pr,rhs_inp)),
+                        llvm_ir::CmpOp::Ne
                             => Ok(Transformation::not(BitField::ptr_eq(pl,lhs_inp,
                                                                        pr,rhs_inp))),
-                        &llvm_ir::CmpOp::ULt => BitField::ptr_lt(pl,lhs_inp,
-                                                                 pr,rhs_inp,em),
+                        llvm_ir::CmpOp::ULt => BitField::ptr_lt(pl,lhs_inp,
+                                                                pr,rhs_inp,em),
                         _ => panic!("Cannot compare pointers using {:?}",op)
                     },
                 _ => panic!("Cannot compare values with pointers")
